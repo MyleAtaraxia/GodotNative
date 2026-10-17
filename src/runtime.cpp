@@ -219,10 +219,11 @@ void NativeScript::setup(const gn::Class *p_info) {
 }
 
 Variant NativeScript::new_(const Variant **, GDExtensionInt, GDExtensionCallError &) {
-	Object *o = ClassDBSingleton::get_singleton()->instantiate(info->base);
+	Variant instance = ClassDBSingleton::get_singleton()->instantiate(info->base);
+	Object *o = instance;
 	ERR_FAIL_NULL_V(o, Variant());
 	o->set_script(this);
-	return o;
+	return instance;
 }
 
 Ref<Script> NativeScript::_get_base_script() const {

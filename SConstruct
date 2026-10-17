@@ -2,6 +2,7 @@
 import os
 
 ARGUMENTS.setdefault("custom_api_file", os.path.abspath(ARGUMENTS.get("api", "api/extension_api.json")))
+project = ARGUMENTS.get("project", "demo")
 env = SConscript("godot-cpp/SConstruct")
 
 ours = env.Clone()
@@ -12,9 +13,9 @@ sources = Glob("src/*.cpp")
 if env["target"] == "editor":
     sources += Glob("src/editor/*.cpp")
 else:
-    sources += Glob("demo/addons/godot_native/generated/*.cpp")
+    sources += Glob(project + "/addons/godot_native/generated/*.cpp")
 
 ours.Default(ours.SharedLibrary(
-    "demo/addons/godot_native/bin/godot_native{}{}".format(env["suffix"], env["SHLIBSUFFIX"]),
+    "{}/addons/godot_native/bin/godot_native{}{}".format(project, env["suffix"], env["SHLIBSUFFIX"]),
     source=sources,
 ))

@@ -175,9 +175,10 @@ public:
 			f->store_string(String::utf8(file.second.c_str()));
 		}
 		int compiled = r.files.size() / 2;
-		String root = ProjectSettings::get_singleton()->globalize_path("res://").path_join("..").simplify_path();
+		String project_dir = ProjectSettings::get_singleton()->globalize_path("res://").trim_suffix("/");
+		String root = project_dir.get_base_dir();
 		Array output;
-		int code = OS::get_singleton()->execute("scons", { "-C", root, "target=template_release", "-j8" }, output, true);
+		int code = OS::get_singleton()->execute("scons", { "-C", root, "target=template_release", "project=" + project_dir.get_file(), "-j8" }, output, true);
 		if (code != 0) {
 			UtilityFunctions::push_error("[GodotNative] scons failed:\n", output);
 			return;

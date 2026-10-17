@@ -7,3 +7,7 @@
 *.pdb
 __pycache__/
 api/
+demo/.godot/
+demo/addons/godot_native/bin/
+demo/addons/godot_native/generated/
+demo/build/
