@@ -1,0 +1,9 @@
+.sconsign.dblite
+.cache/
+*.os
+*.obj
+*.lib
+*.exp
+*.pdb
+__pycache__/
+api/
