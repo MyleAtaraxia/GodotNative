@@ -1,6 +1,7 @@
 #include <runtime.h>
 
 #include <godot_cpp/classes/class_db_singleton.hpp>
+#include <godot_cpp/classes/resource_loader.hpp>
 #include <godot_cpp/core/class_db.hpp>
 #include <godot_cpp/core/error_macros.hpp>
 
@@ -222,6 +223,22 @@ Variant NativeScript::new_(const Variant **, GDExtensionInt, GDExtensionCallErro
 	ERR_FAIL_NULL_V(o, Variant());
 	o->set_script(this);
 	return o;
+}
+
+Ref<Script> NativeScript::_get_base_script() const {
+	if (info->parent && base_script.is_null()) {
+		base_script = ResourceLoader::get_singleton()->load(info->parent);
+	}
+	return base_script;
+}
+
+bool NativeScript::_inherits_script(const Ref<Script> &s) const {
+	for (Ref<Script> c = Ref<Script>(const_cast<NativeScript *>(this)); c.is_valid(); c = c->get_base_script()) {
+		if (c == s) {
+			return true;
+		}
+	}
+	return false;
 }
 
 void *NativeScript::_instance_create(Object *owner) const {

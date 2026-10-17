@@ -70,6 +70,7 @@ protected:
 
 public:
 	const gn::Class *info = nullptr;
+	mutable Ref<Script> base_script;
 	HashMap<StringName, const gn::Method *> methods;
 	HashMap<StringName, const gn::Prop *> props;
 
@@ -77,9 +78,9 @@ public:
 	Variant new_(const Variant **args, GDExtensionInt argc, GDExtensionCallError &error);
 
 	bool _can_instantiate() const override { return true; }
-	Ref<Script> _get_base_script() const override { return {}; }
+	Ref<Script> _get_base_script() const override;
 	StringName _get_global_name() const override { return info->global_name; }
-	bool _inherits_script(const Ref<Script> &s) const override { return s.ptr() == this; }
+	bool _inherits_script(const Ref<Script> &s) const override;
 	StringName _get_instance_base_type() const override { return info->base; }
 	void *_instance_create(Object *owner) const override;
 	void *_placeholder_instance_create(Object *) const override { return nullptr; }

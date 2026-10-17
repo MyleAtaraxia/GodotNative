@@ -44,6 +44,7 @@ struct Class {
 	int method_count;
 	const Prop *props;
 	int prop_count;
+	const char *parent;
 };
 
 struct Registrar {

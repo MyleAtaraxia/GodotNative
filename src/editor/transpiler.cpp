@@ -1,6 +1,8 @@
 #include "transpiler.h"
 
+#include <algorithm>
 #include <cstring>
+#include <memory>
 #include <set>
 #include <sstream>
 
@@ -184,6 +186,14 @@ const char *cty(Ty t) {
 	return "";
 }
 
+std::string sanitize(const std::string &path) {
+	std::string r;
+	for (char c : path.compare(0, 6, "res://") == 0 ? path.substr(6) : path) {
+		r += isalnum((unsigned char)c) ? c : '_';
+	}
+	return r;
+}
+
 std::string class_header(const std::string &name) {
 	std::string r;
 	for (size_t i = 0; i < name.size(); i++) {
@@ -278,10 +288,12 @@ class Compiler {
 	std::vector<Tok> t;
 	size_t p = 0;
 	const std::string path;
-	const ClassQuery &classes;
+	const ProjectQuery &classes;
 	bool unsafe;
+	bool resolved = false;
 
-	std::string base = "RefCounted", global;
+	std::string base = "RefCounted", global, const_block;
+	Fn init_fn;
 	std::vector<Fn> fns;
 	std::vector<Member> members;
 	std::map<std::string, Const> consts;
@@ -550,6 +562,16 @@ class Compiler {
 		return s;
 	}
 
+	std::string native() const { return parent ? parent->native() : base; }
+
+	const Const *find_const(const std::string &n) const {
+		auto c = consts.find(n);
+		if (c != consts.end()) {
+			return &c->second;
+		}
+		return parent ? parent->find_const(n) : nullptr;
+	}
+
 	const Local *find_local(const std::string &n) const {
 		for (auto it = scopes.rbegin(); it != scopes.rend(); ++it) {
 			auto f = it->find(n);
@@ -566,7 +588,16 @@ class Compiler {
 				return &m;
 			}
 		}
-		return nullptr;
+		return parent ? parent->find_member(n) : nullptr;
+	}
+
+	const Compiler *owner_of(const std::string &n) const {
+		for (const Fn &f : fns) {
+			if (f.name == n) {
+				return this;
+			}
+		}
+		return parent ? parent->owner_of(n) : nullptr;
 	}
 
 	const Fn *find_fn(const std::string &n) const {
@@ -575,7 +606,21 @@ class Compiler {
 				return &f;
 			}
 		}
-		return nullptr;
+		return parent ? parent->find_fn(n) : nullptr;
+	}
+
+	std::string struct_name() const { return "C_" + sanitize(path); }
+
+	E super_call(const std::string &n, int line) {
+		expect("(");
+		std::vector<E> a = args();
+		const Fn *f = parent ? parent->find_fn(n) : nullptr;
+		if (f == nullptr) {
+			return { "((void)0)", Ty::Void };
+		}
+		E e = self_call(f, a, line);
+		e.c = parent->struct_name() + "::" + e.c;
+		return e;
 	}
 
 	E self_call(const Fn *f, const std::vector<E> &a, int line) {
@@ -591,7 +636,7 @@ class Compiler {
 
 	E native_call(const std::string &n, NativeMember m, const std::vector<E> &a, int line) {
 		if (m.direct && a.size() <= m.args.size() && a.size() + m.defaults >= m.args.size()) {
-			std::string call = "static_cast<" + base + " *>(owner)->" + n + "(";
+			std::string call = "static_cast<" + native() + " *>(owner)->" + n + "(";
 			for (size_t i = 0; i < a.size(); i++) {
 				call += (i ? ", " : "") + conv(a[i], m.args[i], line);
 			}
@@ -740,8 +785,16 @@ class Compiler {
 			throw Err{ line, "unsupported expression at '" + tok.s + "'" };
 		}
 		const std::string &n = tok.s;
-		if (n == "await" || n == "func" || n == "super" || n == "yield" || n == "preload") {
+		if (n == "await" || n == "func" || n == "yield" || n == "preload") {
 			throw Err{ line, "'" + n + "' is not supported in a native file" };
+		}
+		if (n == "super") {
+			p++;
+			if (eat(".")) {
+				std::string m = ident();
+				return super_call(m, line);
+			}
+			return super_call(cur->name, line);
 		}
 		if (n == "true" || n == "false") {
 			p++;
@@ -798,7 +851,7 @@ class Compiler {
 		if (const Fn *f = find_fn(n)) {
 			return self_call(f, a, line);
 		}
-		NativeMember m = classes.method(base, n);
+		NativeMember m = classes.method(native(), n);
 		if (!m.found) {
 			throw Err{ line, "unknown function " + n };
 		}
@@ -812,11 +865,10 @@ class Compiler {
 		if (const Member *m = find_member(n)) {
 			return { "m_" + n, m->t, "(m_" + n + " = %v)", true };
 		}
-		auto c = consts.find(n);
-		if (c != consts.end()) {
-			return { c->second.c, c->second.t };
+		if (const Const *c = find_const(n)) {
+			return { c->c, c->t };
 		}
-		NativeMember m = classes.property(base, n);
+		NativeMember m = classes.property(native(), n);
 		if (m.found) {
 			std::string get = "owner->get(GN_SN(\"" + n + "\"))";
 			E e{ m.type == Ty::Var ? get : "(" + get + ").operator " + cty(m.type) + "()", m.type };
@@ -1148,12 +1200,17 @@ class Compiler {
 			int line = ln();
 			if (eat("extends")) {
 				if (tk().k == TK::Str) {
-					throw Err{ line, "extending a script is not supported yet" };
+					extends_ref = classes.absolute(path, t[p++].s);
+				} else {
+					base = ident();
+					if (!classes.class_exists(base)) {
+						extends_ref = classes.global_class_path(base);
+						if (extends_ref.empty()) {
+							throw Err{ line, "unknown class " + base };
+						}
+					}
 				}
-				base = ident();
-				if (!classes.class_exists(base)) {
-					throw Err{ line, "extending script class " + base + " is not supported yet" };
-				}
+				extends_line = line;
 				nl();
 			} else if (eat("class_name")) {
 				global = ident();
@@ -1247,6 +1304,8 @@ class Compiler {
 	std::vector<Member> pending_consts;
 
 	void resolve_top() {
+		bool checked = unsafe;
+		unsafe = true;
 		for (const Member &m : pending_consts) {
 			p = m.init;
 			E e = expr();
@@ -1254,9 +1313,10 @@ class Compiler {
 			if (ty != Ty::Int && ty != Ty::Float && ty != Ty::Bool) {
 				throw Err{ m.line, "only int, float and bool constants are supported" };
 			}
-			out += std::string("const ") + cty(ty) + " k_" + m.name + " = " + conv(e, ty, m.line) + ";\n";
+			out += std::string("\tstatic inline const ") + cty(ty) + " k_" + m.name + " = " + conv(e, ty, m.line) + ";\n";
 			consts[m.name] = { "k_" + m.name, ty };
 		}
+		unsafe = checked;
 		for (Member &m : members) {
 			if (m.t == Ty::Void) {
 				p = m.init;
@@ -1300,27 +1360,59 @@ class Compiler {
 	}
 
 public:
-	Compiler(std::vector<Tok> toks, std::string p_path, const ClassQuery &q, bool p_unsafe) :
+	Compiler *parent = nullptr;
+	std::string extends_ref, chain;
+	int extends_line = 0;
+
+	Compiler(std::vector<Tok> toks, std::string p_path, const ProjectQuery &q, bool p_unsafe) :
 			t(std::move(toks)), path(std::move(p_path)), classes(q), unsafe(p_unsafe) {}
 
-	std::vector<std::string> warning_list() const { return { warnings.begin(), warnings.end() }; }
+	void scan() { top_level(); }
+	const std::string &script_path() const { return path; }
+	std::string file_id() const { return sanitize(path); }
+	const std::set<std::string> &warning_set() const { return warnings; }
 
-	std::string run() {
-		top_level();
+	void resolve() {
+		if (resolved) {
+			return;
+		}
+		resolved = true;
+		if (parent) {
+			parent->resolve();
+		}
 		out.clear();
-		Fn init;
-		init.name = "init";
-		cur = &init;
+		init_fn.name = "init";
+		cur = &init_fn;
 		scopes.assign(1, {});
 		resolve_top();
-		std::string const_block = out;
+		const_block = out;
+	}
 
-		std::string decl, defs, wrappers, mtab, ptab, members_init;
+	void collect_virtuals(std::set<std::string> &v) const {
+		if (!parent) {
+			return;
+		}
+		for (const Fn &f : fns) {
+			const Fn *up = parent->find_fn(f.name);
+			if (f.name == "_init" || !up) {
+				continue;
+			}
+			bool same = up->ret == f.ret && up->params.size() == f.params.size();
+			for (size_t i = 0; same && i < f.params.size(); i++) {
+				same = up->params[i].t == f.params[i].t;
+			}
+			if (!same) {
+				throw Err{ f.line, "override of '" + f.name + "' must keep the same parameter and return types as its parent" };
+			}
+			v.insert(f.name);
+		}
+	}
+
+	void emit(const std::set<std::string> &virtuals, std::string &header, std::string &source) {
+		const std::string id = file_id(), self = struct_name();
+		std::string decl, defs, mtab, ptab, members_init;
 		for (const Member &m : members) {
 			decl += std::string("\t") + cty(m.t) + " m_" + m.name + "{};\n";
-			std::string q = "\"" + m.name + "\"";
-			std::string setv = m.t == Ty::Var ? "v" : std::string("v.operator ") + cty(m.t) + "()";
-			ptab += "\t{ " + q + ", (GDExtensionVariantType)Variant::" + vty(m.t) + ", [](void *s, Variant &r) { r = Variant(((C *)s)->m_" + m.name + "); }, [](void *s, const Variant &v) { ((C *)s)->m_" + m.name + " = " + setv + "; } },\n";
 			if (m.init) {
 				p = m.init;
 				E e = expr();
@@ -1329,34 +1421,148 @@ public:
 		}
 		for (const Fn &f : fns) {
 			std::string sig = std::string(cty(f.ret)) + " C::f_" + f.name + "(";
-			std::string d = std::string("\t") + cty(f.ret) + " f_" + f.name + "(";
-			std::string call = "((C *)s)->f_" + f.name + "(";
+			std::string d = std::string("\t") + (virtuals.count(f.name) ? "virtual " : "") + cty(f.ret) + " f_" + f.name + "(";
 			int i = 0;
 			for (const Param &a : f.params) {
-				std::string one = std::string(i ? ", " : "") + cty(a.t) + " l_" + a.name;
+				std::string one = std::string(i++ ? ", " : "") + cty(a.t) + " l_" + a.name;
 				sig += one;
 				d += one;
-				call += std::string(i ? ", " : "") + (a.t == Ty::Var ? "*a[" + std::to_string(i) + "]" : "a[" + std::to_string(i) + "]->operator " + cty(a.t) + "()");
-				i++;
 			}
 			decl += d + ");\n";
 			defs += sig + ") {\n" + emit_fn(f) + "}\n\n";
+		}
+
+		std::vector<const Compiler *> lineage;
+		for (const Compiler *c = this; c; c = c->parent) {
+			lineage.insert(lineage.begin(), c);
+		}
+		std::map<std::string, const Fn *> table;
+		int props = 0;
+		for (const Compiler *c : lineage) {
+			for (const Fn &f : c->fns) {
+				if (f.name != "_init") {
+					table[f.name] = &f;
+				}
+			}
+			for (const Member &m : c->members) {
+				std::string setv = m.t == Ty::Var ? "v" : std::string("v.operator ") + cty(m.t) + "()";
+				ptab += "\t{ \"" + m.name + "\", (GDExtensionVariantType)Variant::" + vty(m.t) + ", [](void *s, Variant &r) { r = Variant(((C *)s)->m_" + m.name + "); }, [](void *s, const Variant &v) { ((C *)s)->m_" + m.name + " = " + setv + "; } },\n";
+				props++;
+			}
+		}
+		for (const auto &kv : table) {
+			const Fn &f = *kv.second;
+			std::string call = "((C *)s)->f_" + f.name + "(";
+			int i = 0;
+			for (const Param &a : f.params) {
+				call += std::string(i ? ", " : "") + (a.t == Ty::Var ? "*a[" + std::to_string(i) + "]" : "a[" + std::to_string(i) + "]->operator " + cty(a.t) + "()");
+				i++;
+			}
 			std::string body = f.ret == Ty::Void ? call + "); r = Variant();" : "r = Variant(" + call + "));";
 			mtab += "\t{ \"" + f.name + "\", " + std::to_string(i) + ", [](void *s, const Variant **a, Variant &r) { " + body + " } },\n";
 		}
 
-		std::string call_init = find_fn("_init") ? "\tc->f__init();\n" : "";
-		std::string gen = "// Generated by GodotNative from " + path + ". Do not edit.\n";
-		gen += "#define GN_FILE \"" + path + "\"\n#include <gn_runtime.h>\n#include <godot_cpp/classes/" + class_header(base) + ".hpp>\n#include <godot_cpp/variant/builtin_types.hpp>\n#include <cstdlib>\n\nusing namespace godot;\n\nnamespace {\n\n";
-		gen += const_block + "\nstruct C {\n\tObject *owner;\n" + decl + "\tvoid init();\n};\n\n";
-		gen += "void C::init() {\n" + members_init + "}\n\n" + defs;
-		gen += "const gn::Method methods[] = {\n" + mtab + "\t{ nullptr, 0, nullptr },\n};\n";
-		gen += "const gn::Prop props[] = {\n" + ptab + "\t{ nullptr, GDEXTENSION_VARIANT_TYPE_NIL, nullptr, nullptr },\n};\n\n";
-		gen += "void *create(Object *owner) {\n\tC *c = new C();\n\tc->owner = owner;\n\tc->init();\n" + call_init + "\treturn c;\n}\n\n";
-		gen += "void destroy(void *self) { delete (C *)self; }\n\n";
-		gen += "const gn::Class klass = { \"" + path + "\", \"" + base + "\", \"" + global + "\", create, destroy, methods, " + std::to_string(fns.size()) + ", props, " + std::to_string(members.size()) + " };\n";
-		gen += "gn::Registrar reg(&klass);\n\n} // namespace\n";
-		return gen;
+		std::string call_init;
+		if (const Compiler *o = owner_of("_init")) {
+			if (!find_fn("_init")->params.empty()) {
+				throw Err{ find_fn("_init")->line, "_init with parameters is not supported yet" };
+			}
+			call_init = "\tc->" + o->struct_name() + "::f__init();\n";
+		}
+
+		header = "// Generated by GodotNative from " + path + ". Do not edit.\n#pragma once\n#include <gn_runtime.h>\n";
+		header += "#include <godot_cpp/classes/" + class_header(native()) + ".hpp>\n#include <godot_cpp/variant/builtin_types.hpp>\n#include <cstdlib>\n";
+		if (parent) {
+			header += "#include \"" + parent->file_id() + ".gen.h\"\n";
+		}
+		header += "\nnamespace gn_gen {\n\nusing namespace godot;\n\nstruct " + self + (parent ? " : " + parent->struct_name() : "") + " {\n";
+		header += parent ? "" : "\tObject *owner = nullptr;\n";
+		header += const_block + decl + "\tvoid init();\n};\n\n} // namespace gn_gen\n";
+
+		source = "// Generated by GodotNative from " + path + ". Do not edit.\n#define GN_FILE \"" + path + "\"\n#include \"" + id + ".gen.h\"\n\nnamespace gn_gen {\n\nusing C = " + self + ";\n\n";
+		source += "void C::init() {\n" + (parent ? parent->struct_name() + "::init();\n" : std::string()) + members_init + "}\n\n" + defs;
+		source += "namespace {\n\nconst gn::Method methods[] = {\n" + mtab + "\t{ nullptr, 0, nullptr },\n};\n";
+		source += "const gn::Prop props[] = {\n" + ptab + "\t{ nullptr, GDEXTENSION_VARIANT_TYPE_NIL, nullptr, nullptr },\n};\n\n";
+		source += "void *create(Object *owner) {\n\tC *c = new C();\n\tc->owner = owner;\n\tc->init();\n" + call_init + "\treturn c;\n}\n\n";
+		source += "void destroy(void *self) { delete (C *)self; }\n\n";
+		source += "const gn::Class klass = { \"" + path + "\", \"" + native() + "\", \"" + global + "\", create, destroy, methods, " + std::to_string(table.size()) + ", props, " + std::to_string(props) + ", " + (parent ? "\"" + parent->path + "\"" : std::string("nullptr")) + " };\n";
+		source += "gn::Registrar reg(&klass);\n\n} // namespace\n\n} // namespace gn_gen\n";
+	}
+};
+
+struct ProjectError {
+	std::string msg;
+};
+
+class Project {
+	const ProjectQuery &query;
+	std::map<std::string, std::unique_ptr<Compiler>> units;
+	std::vector<Compiler *> order;
+
+	Compiler *load(const std::string &path, const std::string &chain) {
+		auto found = units.find(path);
+		std::string where = chain.empty() ? path : chain + " -> " + path;
+		if (found != units.end()) {
+			if (std::find(order.begin(), order.end(), found->second.get()) == order.end()) {
+				throw ProjectError{ where + ": inheritance cycle" };
+			}
+			return found->second.get();
+		}
+		std::string src;
+		if (!query.read(path, src)) {
+			throw ProjectError{ where + ": could not read the file" };
+		}
+		Compiler *c = nullptr;
+		try {
+			auto u = std::make_unique<Compiler>(tokenize(src), path, query, first_line(src) == "#pragma native unsafe");
+			c = u.get();
+			units[path] = std::move(u);
+			c->chain = where;
+			c->scan();
+		} catch (const Err &e) {
+			throw ProjectError{ where + ":" + std::to_string(e.line) + ": " + e.msg };
+		}
+		if (!c->extends_ref.empty()) {
+			c->parent = load(c->extends_ref, where);
+		}
+		order.push_back(c);
+		return c;
+	}
+
+	template <typename F>
+	void guarded(Compiler *c, F f) {
+		try {
+			f();
+		} catch (const Err &e) {
+			throw ProjectError{ c->chain + ":" + std::to_string(e.line) + ": " + e.msg };
+		}
+	}
+
+public:
+	explicit Project(const ProjectQuery &q) :
+			query(q) {}
+
+	void run(const std::vector<std::string> &toggled, Output &r) {
+		for (const std::string &path : toggled) {
+			load(path, "");
+		}
+		std::set<std::string> virtuals;
+		for (Compiler *c : order) {
+			guarded(c, [&]() {
+				c->resolve();
+				c->collect_virtuals(virtuals);
+			});
+		}
+		for (Compiler *c : order) {
+			std::string h, cpp;
+			guarded(c, [&]() { c->emit(virtuals, h, cpp); });
+			r.files.push_back({ c->file_id() + ".gen.h", h });
+			r.files.push_back({ c->file_id() + ".cpp", cpp });
+			r.warnings.insert(r.warnings.end(), c->warning_set().begin(), c->warning_set().end());
+			if (std::find(toggled.begin(), toggled.end(), c->script_path()) == toggled.end()) {
+				r.implied.push_back(c->script_path());
+			}
+		}
 	}
 };
 
@@ -1367,15 +1573,13 @@ bool is_toggled(const std::string &source) {
 	return l == "#pragma native" || l == "#pragma native unsafe";
 }
 
-Result transpile(const std::string &source, const std::string &path, const ClassQuery &classes) {
-	Result r;
+Output transpile_project(const std::vector<std::string> &toggled, const ProjectQuery &query) {
+	Output r;
 	try {
-		Compiler c(tokenize(source), path, classes, first_line(source) == "#pragma native unsafe");
-		r.cpp = c.run();
-		r.warnings = c.warning_list();
+		Project(query).run(toggled, r);
 		r.ok = true;
-	} catch (const Err &e) {
-		r.error = path + ":" + std::to_string(e.line) + ": " + e.msg;
+	} catch (const ProjectError &e) {
+		r.error = e.msg;
 	}
 	return r;
 }

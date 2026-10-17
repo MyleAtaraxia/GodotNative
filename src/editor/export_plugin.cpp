@@ -43,7 +43,7 @@ bool direct_ok(gn::Ty t) {
 	return t != gn::Ty::Var && t != gn::Ty::Arr && t != gn::Ty::Dict && t != gn::Ty::PF64 && t != gn::Ty::PI64;
 }
 
-class LiveClasses : public gn::ClassQuery {
+class LiveClasses : public gn::ProjectQuery {
 public:
 	bool class_exists(const std::string &name) const override {
 		return ClassDBSingleton::get_singleton()->class_exists(name.c_str());
@@ -70,6 +70,28 @@ public:
 			}
 		}
 		return r;
+	}
+	bool read(const std::string &path, std::string &source) const override {
+		String p = path.c_str();
+		if (!FileAccess::file_exists(p)) {
+			return false;
+		}
+		source = std_str(FileAccess::get_file_as_string(p));
+		return true;
+	}
+	std::string absolute(const std::string &from, const std::string &path) const override {
+		String p = path.c_str();
+		return std_str(p.is_absolute_path() ? p : String(from.c_str()).get_base_dir().path_join(p).simplify_path());
+	}
+	std::string global_class_path(const std::string &name) const override {
+		TypedArray<Dictionary> list = ProjectSettings::get_singleton()->get_global_class_list();
+		for (int i = 0; i < list.size(); i++) {
+			Dictionary d = list[i];
+			if (String(d["class"]) == String(name.c_str())) {
+				return std_str(d["path"]);
+			}
+		}
+		return "";
 	}
 	gn::NativeMember property(const std::string &cls, const std::string &name) const override {
 		gn::NativeMember r;
@@ -131,30 +153,28 @@ public:
 		PackedStringArray scripts;
 		find_scripts("res://", scripts);
 		LiveClasses classes;
-		bool ok = true;
-		int compiled = 0;
+		std::vector<std::string> toggled;
 		for (const String &path : scripts) {
-			std::string src = std_str(FileAccess::get_file_as_string(path));
-			if (!gn::is_toggled(src)) {
-				continue;
+			if (gn::is_toggled(std_str(FileAccess::get_file_as_string(path)))) {
+				toggled.push_back(std_str(path));
 			}
-			gn::Result r = gn::transpile(src, std_str(path), classes);
-			for (const std::string &w : r.warnings) {
-				UtilityFunctions::print("[GodotNative] warning: ", w.c_str());
-			}
-			if (!r.ok) {
-				UtilityFunctions::push_error("[GodotNative] ", r.error.c_str());
-				ok = false;
-				continue;
-			}
-			String name = path.trim_prefix("res://").replace("/", "_").get_basename() + ".cpp";
-			Ref<FileAccess> f = FileAccess::open(String(GENERATED_DIR).path_join(name), FileAccess::WRITE);
-			f->store_string(String::utf8(r.cpp.c_str()));
-			compiled++;
 		}
-		if (!ok) {
+		gn::Output r = gn::transpile_project(toggled, classes);
+		for (const std::string &w : r.warnings) {
+			UtilityFunctions::print("[GodotNative] warning: ", w.c_str());
+		}
+		if (!r.ok) {
+			UtilityFunctions::push_error("[GodotNative] ", r.error.c_str());
 			return;
 		}
+		for (const std::string &p : r.implied) {
+			UtilityFunctions::print("[GodotNative] also compiled as a parent script: ", p.c_str());
+		}
+		for (const auto &file : r.files) {
+			Ref<FileAccess> f = FileAccess::open(String(GENERATED_DIR).path_join(file.first.c_str()), FileAccess::WRITE);
+			f->store_string(String::utf8(file.second.c_str()));
+		}
+		int compiled = r.files.size() / 2;
 		String root = ProjectSettings::get_singleton()->globalize_path("res://").path_join("..").simplify_path();
 		Array output;
 		int code = OS::get_singleton()->execute("scons", { "-C", root, "target=template_release", "-j8" }, output, true);
