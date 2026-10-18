@@ -16,6 +16,7 @@ var sim_ms := 0.0
 
 func _ready() -> void:
 	if "--bench" in OS.get_cmdline_user_args():
+		set_process(false)
 		bench()
 		get_tree().quit()
 		return

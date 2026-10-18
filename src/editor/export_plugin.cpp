@@ -16,7 +16,6 @@ using namespace godot;
 namespace {
 
 const char *GENERATED_DIR = "res://addons/godot_native/generated";
-const char *LIBRARY = "res://addons/godot_native/bin/godot_native.windows.template_release.x86_64.dll";
 
 std::string std_str(const String &s) {
 	return s.utf8().get_data();
@@ -125,6 +124,77 @@ void find_scripts(const String &dir, PackedStringArray &out) {
 	}
 }
 
+String library_path(const String &target) {
+	return "res://addons/godot_native/bin/godot_native.windows." + target + ".x86_64.dll";
+}
+
+bool sync_generated(const gn::Output &r) {
+	bool changed = false;
+	PackedStringArray ids;
+	for (const auto &file : r.files) {
+		String name = file.first.c_str();
+		ids.push_back(name.get_slice(".", 0));
+		String path = String(GENERATED_DIR).path_join(name);
+		String text = String::utf8(file.second.c_str());
+		if (!FileAccess::file_exists(path) || FileAccess::get_file_as_string(path) != text) {
+			Ref<FileAccess> f = FileAccess::open(path, FileAccess::WRITE);
+			f->store_string(text);
+			changed = true;
+		}
+	}
+	Ref<DirAccess> gen = DirAccess::open(GENERATED_DIR);
+	for (const String &f : gen->get_files()) {
+		String id = f.get_slice(".", 0);
+		if (!id.is_empty() && !ids.has(id)) {
+			gen->remove(f);
+			changed = true;
+		}
+	}
+	return changed;
+}
+
+bool compile_native(const String &target) {
+	DirAccess::make_dir_recursive_absolute(GENERATED_DIR);
+	Ref<FileAccess> ignore = FileAccess::open(String(GENERATED_DIR).path_join(".gdignore"), FileAccess::WRITE);
+	ignore.unref();
+
+	PackedStringArray scripts;
+	find_scripts("res://", scripts);
+	LiveClasses classes;
+	std::vector<std::string> toggled;
+	for (const String &path : scripts) {
+		if (gn::is_toggled(std_str(FileAccess::get_file_as_string(path)))) {
+			toggled.push_back(std_str(path));
+		}
+	}
+	gn::Output r = gn::transpile_project(toggled, classes);
+	for (const std::string &w : r.warnings) {
+		UtilityFunctions::print("[GodotNative] warning: ", w.c_str());
+	}
+	if (!r.ok) {
+		UtilityFunctions::push_error("[GodotNative] ", r.error.c_str());
+		return false;
+	}
+	for (const std::string &p : r.implied) {
+		UtilityFunctions::print("[GodotNative] also compiled as a parent script: ", p.c_str());
+	}
+	// shortcut: only generated code is compared, so changing the addon's own runtime needs the old library deleted. Upgrade by hashing the runtime sources if that ever bites users.
+	if (!sync_generated(r) && FileAccess::file_exists(library_path(target))) {
+		return true;
+	}
+	String project_dir = ProjectSettings::get_singleton()->globalize_path("res://").trim_suffix("/");
+	String root = project_dir.get_base_dir();
+	Array output;
+	// shortcut: scons blocks the editor while it compiles. Upgrade to a background build with a progress dialog when the wait becomes a complaint.
+	int code = OS::get_singleton()->execute("scons", { "-C", root, "target=" + target, "project=" + project_dir.get_file(), "-j8" }, output, true);
+	if (code != 0) {
+		UtilityFunctions::push_error("[GodotNative] scons failed:\n", output);
+		return false;
+	}
+	UtilityFunctions::print("[GodotNative] compiled ", int(r.files.size() / 2), " file(s) for ", target);
+	return true;
+}
+
 } // namespace
 
 namespace godot {
@@ -138,52 +208,11 @@ protected:
 public:
 	String _get_name() const override { return "GodotNative"; }
 
-	void _export_begin(const PackedStringArray &, bool, const String &, uint32_t) override {
+	void _export_begin(const PackedStringArray &, bool is_debug, const String &, uint32_t) override {
 		// shortcut: failures only print an error and remove the library, because _export_begin cannot abort. Upgrade once a real export hook exists for this.
-		DirAccess::make_dir_recursive_absolute(GENERATED_DIR);
-		Ref<DirAccess> gen = DirAccess::open(GENERATED_DIR);
-		for (const String &f : gen->get_files()) {
-			gen->remove(f);
-		}
-		DirAccess::remove_absolute(LIBRARY);
-
-		Ref<FileAccess> ignore = FileAccess::open(String(GENERATED_DIR).path_join(".gdignore"), FileAccess::WRITE);
-		ignore.unref();
-
-		PackedStringArray scripts;
-		find_scripts("res://", scripts);
-		LiveClasses classes;
-		std::vector<std::string> toggled;
-		for (const String &path : scripts) {
-			if (gn::is_toggled(std_str(FileAccess::get_file_as_string(path)))) {
-				toggled.push_back(std_str(path));
-			}
-		}
-		gn::Output r = gn::transpile_project(toggled, classes);
-		for (const std::string &w : r.warnings) {
-			UtilityFunctions::print("[GodotNative] warning: ", w.c_str());
-		}
-		if (!r.ok) {
-			UtilityFunctions::push_error("[GodotNative] ", r.error.c_str());
-			return;
-		}
-		for (const std::string &p : r.implied) {
-			UtilityFunctions::print("[GodotNative] also compiled as a parent script: ", p.c_str());
-		}
-		for (const auto &file : r.files) {
-			Ref<FileAccess> f = FileAccess::open(String(GENERATED_DIR).path_join(file.first.c_str()), FileAccess::WRITE);
-			f->store_string(String::utf8(file.second.c_str()));
-		}
-		int compiled = r.files.size() / 2;
-		String project_dir = ProjectSettings::get_singleton()->globalize_path("res://").trim_suffix("/");
-		String root = project_dir.get_base_dir();
-		Array output;
-		int code = OS::get_singleton()->execute("scons", { "-C", root, "target=template_release", "project=" + project_dir.get_file(), "-j8" }, output, true);
-		if (code != 0) {
-			UtilityFunctions::push_error("[GodotNative] scons failed:\n", output);
-			return;
-		}
-		UtilityFunctions::print("[GodotNative] compiled ", compiled, " file(s)");
+		String target = is_debug ? "template_debug" : "template_release";
+		DirAccess::remove_absolute(library_path(target));
+		compile_native(target);
 	}
 };
 
@@ -196,6 +225,7 @@ protected:
 	static void _bind_methods() {}
 
 public:
+	bool _build() override { return compile_native("template_debug"); }
 	void _enter_tree() override {
 		exporter.instantiate();
 		add_export_plugin(exporter);
