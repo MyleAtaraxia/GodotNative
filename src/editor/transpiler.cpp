@@ -811,15 +811,109 @@ class Compiler {
 			call += ")";
 			return { m.type == Ty::Void ? call : std::string(cty(m.type)) + "(" + call + ")", m.type };
 		}
+		E typed;
+		if (bound_call("(void *)owner->_owner", native(), n, a, line, typed)) {
+			return typed;
+		}
 		std::string list = var_args(a, line);
 		std::string call = "owner->call(GN_SN(\"" + n + "\")" + (list.empty() ? "" : ", " + list) + ")";
 		if (m.type == Ty::Void) {
 			return { call, Ty::Void };
 		}
 		if (m.type == Ty::Var) {
-			return { call, Ty::Var };
+			E e{ call, Ty::Var };
+			e.ref.cls = object_return(native(), n);
+			return e;
 		}
 		return { "(" + call + ").operator " + cty(m.type) + "()", m.type };
+	}
+
+	bool api_type(const std::string &name, Ty &ty, std::string &cpp, std::string &variant) const {
+		static const std::map<std::string, Ty> simple = { { "int", Ty::Int }, { "float", Ty::Float }, { "bool", Ty::Bool }, { "String", Ty::Str }, { "Vector2", Ty::V2 }, { "Vector3", Ty::V3 }, { "PackedFloat64Array", Ty::PF64 }, { "PackedInt64Array", Ty::PI64 }, { "Array", Ty::Arr }, { "Dictionary", Ty::Dict }, { "Variant", Ty::Var } };
+		std::string n = name;
+		variant.clear();
+		if (n.rfind("enum::", 0) == 0 || n.rfind("bitfield::", 0) == 0) {
+			n = "int";
+		} else if (n.rfind("typedarray::", 0) == 0) {
+			n = "Array";
+		} else if (n.rfind("typeddictionary::", 0) == 0) {
+			n = "Dictionary";
+		}
+		auto it = simple.find(n);
+		if (it != simple.end()) {
+			ty = it->second;
+			cpp = cty(ty);
+			return true;
+		}
+		auto b = builtin_ctors().find(n);
+		if (b != builtin_ctors().end() || n == "RID" || n == "Callable" || n == "Signal") {
+			ty = Ty::Var;
+			cpp = n;
+			variant = n == "RID" ? "RID" : n == "Callable" ? "CALLABLE" : n == "Signal" ? "SIGNAL" : b->second;
+			return true;
+		}
+		return false;
+	}
+
+	std::string object_return(const std::string &cls, const std::string &n) const {
+		NativeBind m = classes.bind(cls, n);
+		Ty ty;
+		std::string cpp, variant;
+		if (!m.found || m.ret == "void" || api_type(m.ret, ty, cpp, variant) || !classes.class_exists(m.ret)) {
+			return "";
+		}
+		return m.ret;
+	}
+
+	bool bound_call(const std::string &object, const std::string &cls, const std::string &n, const std::vector<E> &a, int line, E &r) {
+		NativeBind m = classes.bind(cls, n);
+		Ty ret = Ty::Void;
+		std::string ret_cpp, ret_variant;
+		if (!m.found || !m.ptr || a.size() > m.args.size() || (m.ret != "void" && !api_type(m.ret, ret, ret_cpp, ret_variant))) {
+			return false;
+		}
+		std::string tail;
+		for (size_t i = a.size(); i < m.args.size(); i++) {
+			Ty ty;
+			std::string cpp, variant;
+			api_type(m.args[i], ty, cpp, variant);
+			const std::string &d = m.defaults[i];
+			bool number = !d.empty() && d.find_first_not_of("-0123456789.e") == std::string::npos;
+			if ((ty == Ty::Bool && (d == "true" || d == "false")) || ((ty == Ty::Int || ty == Ty::Float) && number)) {
+				tail += ", " + cpp + "(" + d + ")";
+			} else {
+				return false;
+			}
+		}
+		std::string list;
+		for (size_t i = 0; i < a.size(); i++) {
+			Ty ty;
+			std::string cpp, variant;
+			api_type(m.args[i], ty, cpp, variant);
+			std::string value;
+			if (!variant.empty()) {
+				std::string v = conv(a[i], Ty::Var, line);
+				value = unsafe ? "(" + v + ").operator " + cpp + "()" : "gn::cast<" + cpp + ">(" + v + ", Variant::" + variant + ", " + L(line) + ")";
+			} else {
+				value = cpp + "(" + conv(a[i], ty, line) + ")";
+			}
+			list += ", " + value;
+		}
+		list += tail;
+		std::string head = "GN_MB(\"" + m.owner + "\", \"" + n + "\", " + std::to_string(m.hash) + "LL), " + object;
+		if (m.ret == "void") {
+			r = { "gn::pcall_void(" + head + list + ")", Ty::Void };
+			return true;
+		}
+		std::string call = "gn::pcall<" + ret_cpp + ">(" + head + list + ")";
+		r = { ret_variant.empty() ? call : "Variant(" + call + ")", ret };
+		r.ref.builtin = ret_variant;
+		return true;
+	}
+
+	std::string object_of(const E &b, int line) {
+		std::string v = conv(b, Ty::Var, line);
+		return unsafe ? "gn::raw_object(" + v + ")" : "gn::live_object(" + v + ", " + L(line) + ")";
 	}
 
 	bool global_call(const std::string &n, E &r, int line) {
@@ -1215,7 +1309,11 @@ class Compiler {
 			if (called.found && called.is_static && t[p + 3].s == "(") {
 				p += 4;
 				std::vector<E> a = args();
-				return { "gn::static_call(GN_SN(\"" + n + "\"), GN_SN(\"" + m + "\"), {" + var_args(a, line) + "}, " + L(line) + ")", Ty::Var };
+				NativeBind found = classes.bind(n, m);
+				if (!found.found) {
+					throw Err{ line, "no method bind for " + n + "." + m };
+				}
+				return { "gn::static_call(GN_MB(\"" + found.owner + "\", \"" + m + "\", " + std::to_string(found.hash) + "LL), {" + var_args(a, line) + "}, " + L(line) + ")", Ty::Var };
 			}
 			if (classes.int_constant(n, m, value)) {
 				p += 3;
@@ -1223,7 +1321,9 @@ class Compiler {
 			}
 			if (classes.is_singleton(n)) {
 				p++;
-				return { "gn::singleton(GN_SN(\"" + n + "\"))", Ty::Var };
+				E e{ "GN_SINGLETON(\"" + n + "\")", Ty::Var };
+				e.ref.cls = n;
+				return e;
 			}
 			throw Err{ line, "static member " + n + "." + m + " is not supported" };
 		}
@@ -1282,6 +1382,7 @@ class Compiler {
 			std::string get = "owner->get(GN_SN(\"" + n + "\"))";
 			E e{ m.type == Ty::Var ? get : "(" + get + ").operator " + cty(m.type) + "()", m.type };
 			e.set = "owner->set(GN_SN(\"" + n + "\"), Variant(%v))";
+			typed_property("(void *)owner->_owner", native(), n, e, line);
 			return e;
 		}
 		if (classes.method(native(), n).found) {
@@ -1331,8 +1432,18 @@ class Compiler {
 		if (b.t == Ty::PF64 || b.t == Ty::PI64) {
 			throw Err{ line, "unsupported packed array method " + n };
 		}
+		if (!b.ref.cls.empty()) {
+			E typed;
+			if (bound_call(object_of(b, line), b.ref.cls, n, a, line, typed)) {
+				return typed;
+			}
+		}
 		std::string list = var_args(a, line);
-		return { "gn::mcall(" + conv(b, Ty::Var, line) + ", GN_SN(\"" + n + "\"), {" + list + "}, " + L(line) + ")", Ty::Var };
+		E e{ "gn::mcall(" + conv(b, Ty::Var, line) + ", GN_SN(\"" + n + "\"), {" + list + "}, " + L(line) + ")", Ty::Var };
+		if (!b.ref.cls.empty()) {
+			e.ref.cls = object_return(b.ref.cls, n);
+		}
+		return e;
 	}
 
 	E attr(const E &b, const std::string &n, int line) {
@@ -1340,6 +1451,9 @@ class Compiler {
 			E e{ "double(" + b.c + "." + n + ")", Ty::Float };
 			if (b.lv) {
 				e.set = "(" + b.c + "." + n + " = real_t(%v))";
+			} else if (!b.set.empty()) {
+				std::string v = temp();
+				e.set = "[&]() { " + std::string(cty(b.t)) + " " + v + " = " + b.c + "; " + v + "." + n + " = real_t(%v); " + subst(b.set, v) + "; }()";
 			}
 			return e;
 		}
@@ -1347,7 +1461,30 @@ class Compiler {
 		E e{ "gn::get_named(" + conv(b, Ty::Var, line) + ", " + name + ", " + L(line) + ")", Ty::Var };
 		std::string s = temp();
 		e.set = "[&]() { Variant " + s + " = " + conv(b, Ty::Var, line) + "; gn::set_named(" + s + ", " + name + ", %v, " + L(line) + ");" + write_back(b, s) + " }()";
+		if (!b.ref.cls.empty()) {
+			typed_property(object_of(b, line), b.ref.cls, n, e, line);
+		}
 		return e;
+	}
+
+	void typed_property(const std::string &object, const std::string &cls, const std::string &n, E &e, int line) {
+		std::string getter, setter;
+		if (!classes.accessors(cls, n, getter, setter)) {
+			return;
+		}
+		std::string fallback = e.set;
+		E typed;
+		if (bound_call(object, cls, getter, {}, line, typed)) {
+			e = typed;
+			e.set = fallback;
+		} else {
+			e.ref.cls = object_return(cls, getter);
+		}
+		E value{ "%v", e.t };
+		E stored;
+		if (!setter.empty() && bound_call(object, cls, setter, { value }, line, stored) && stored.t == Ty::Void) {
+			e.set = stored.c;
+		}
 	}
 
 	std::string write_back(const E &b, const std::string &s) {

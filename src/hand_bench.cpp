@@ -1,4 +1,5 @@
 #include <godot_cpp/classes/node.hpp>
+#include <godot_cpp/classes/node2d.hpp>
 #include <godot_cpp/core/class_db.hpp>
 #include <godot_cpp/variant/builtin_types.hpp>
 
@@ -14,6 +15,7 @@ protected:
 		ClassDB::bind_method(D_METHOD("vec_math", "n"), &HandBench::vec_math);
 		ClassDB::bind_method(D_METHOD("packed", "n"), &HandBench::packed);
 		ClassDB::bind_method(D_METHOD("engine_calls", "n"), &HandBench::engine_calls);
+		ClassDB::bind_method(D_METHOD("typed_nodes", "n"), &HandBench::typed_nodes);
 	}
 
 public:
@@ -57,6 +59,20 @@ public:
 		}
 		return s;
 	}
+	double typed_nodes(int64_t n) {
+		Node2D *s = memnew(Node2D);
+		Vector2 v;
+		double c = 0.0;
+		for (int64_t i = 0; i < n; i++) {
+			s->set_position(v);
+			v = s->get_position() + Vector2(1, 1);
+			c += s->get_child_count();
+		}
+		c += v.x;
+		memdelete(s);
+		return c;
+	}
+
 	int64_t engine_calls(int64_t n) {
 		int64_t c = 0;
 		for (int64_t i = 0; i < n; i++) {

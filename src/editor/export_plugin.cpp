@@ -26,10 +26,25 @@ std::string std_str(const String &s) {
 	return s.utf8().get_data();
 }
 
+struct ApiMethod {
+	uint32_t hash = 0;
+	bool plain = false;
+	std::vector<std::string> args;
+	std::vector<std::string> defaults;
+	std::string ret;
+};
+
+struct ApiProperty {
+	std::string getter, setter;
+};
+
 struct ApiData {
 	std::map<std::string, int64_t> globals;
 	std::set<std::string> builtin_constants;
-	std::map<std::string, uint32_t> hashes;
+	std::set<std::string> builtin_types;
+	std::map<std::string, ApiMethod> methods;
+	std::map<std::string, ApiProperty> properties;
+	std::map<std::string, std::string> parents;
 	std::map<std::string, std::pair<std::string, bool>> utilities;
 };
 
@@ -63,6 +78,7 @@ const ApiData &api_data() {
 	Array builtins = api.get("builtin_classes", Array());
 	for (int i = 0; i < builtins.size(); i++) {
 		Dictionary b = builtins[i];
+		data->builtin_types.insert(std_str(b["name"]));
 		Array list = b.get("constants", Array());
 		for (int c = 0; c < list.size(); c++) {
 			Dictionary k = list[c];
@@ -72,15 +88,43 @@ const ApiData &api_data() {
 	Array classes = api.get("classes", Array());
 	for (int i = 0; i < classes.size(); i++) {
 		Dictionary c = classes[i];
+		std::string name = std_str(c["name"]);
+		if (c.has("inherits")) {
+			data->parents[name] = std_str(c["inherits"]);
+		}
 		Array methods = c.get("methods", Array());
 		for (int m = 0; m < methods.size(); m++) {
 			Dictionary d = methods[m];
-			if (d.has("hash")) {
-				data->hashes[std_str(c["name"]) + "." + std_str(d["name"])] = uint32_t(double(d["hash"]));
+			if (!d.has("hash")) {
+				continue;
+			}
+			ApiMethod info;
+			info.hash = uint32_t(double(d["hash"]));
+			info.plain = !bool(d["is_vararg"]) && !bool(d["is_virtual"]) && !bool(d["is_static"]);
+			Array args = d.get("arguments", Array());
+			for (int a = 0; a < args.size(); a++) {
+				Dictionary arg = args[a];
+				info.args.push_back(std_str(arg["type"]));
+				info.defaults.push_back(std_str(arg.get("default_value", "")));
+			}
+			Dictionary ret = d.get("return_value", Dictionary());
+			info.ret = ret.has("type") ? std_str(ret["type"]) : "void";
+			data->methods[name + "." + std_str(d["name"])] = info;
+		}
+		Array props = c.get("properties", Array());
+		for (int n = 0; n < props.size(); n++) {
+			Dictionary d = props[n];
+			if (!d.has("index")) {
+				data->properties[name + "." + std_str(d["name"])] = { std_str(d.get("getter", "")), std_str(d.get("setter", "")) };
 			}
 		}
 	}
 	return *data;
+}
+
+bool value_type(const ApiData &api, const std::string &t) {
+	bool prefixed = t.rfind("enum::", 0) == 0 || t.rfind("bitfield::", 0) == 0 || t.rfind("typedarray::", 0) == 0 || t.rfind("typeddictionary::", 0) == 0;
+	return prefixed || t == "Variant" || t == "int" || t == "float" || t == "bool" || api.builtin_types.count(t) > 0;
 }
 
 gn::Ty to_ty(int64_t t, bool is_return_variant) {
@@ -143,6 +187,50 @@ public:
 	}
 	bool is_singleton(const std::string &name) const override {
 		return Engine::get_singleton()->has_singleton(name.c_str());
+	}
+	gn::NativeBind bind(const std::string &cls, const std::string &name) const override {
+		gn::NativeBind r;
+		const ApiData &api = api_data();
+		std::string c = cls;
+		for (;;) {
+			auto it = api.methods.find(c + "." + name);
+			if (it != api.methods.end()) {
+				const ApiMethod &m = it->second;
+				r.found = true;
+				r.owner = c;
+				r.hash = m.hash;
+				r.args = m.args;
+				r.defaults = m.defaults;
+				r.ret = m.ret;
+				r.ptr = m.plain;
+				for (const std::string &a : m.args) {
+					r.ptr = r.ptr && value_type(api, a);
+				}
+				return r;
+			}
+			auto up = api.parents.find(c);
+			if (up == api.parents.end()) {
+				return r;
+			}
+			c = up->second;
+		}
+	}
+	bool accessors(const std::string &cls, const std::string &name, std::string &getter, std::string &setter) const override {
+		const ApiData &api = api_data();
+		std::string c = cls;
+		for (;;) {
+			auto it = api.properties.find(c + "." + name);
+			if (it != api.properties.end()) {
+				getter = it->second.getter;
+				setter = it->second.setter;
+				return true;
+			}
+			auto up = api.parents.find(c);
+			if (up == api.parents.end()) {
+				return false;
+			}
+			c = up->second;
+		}
 	}
 	bool utility(const std::string &name, std::string &ret, bool &vararg) const override {
 		auto it = api_data().utilities.find(name);

@@ -18,6 +18,16 @@ struct NativeMember {
 	int defaults = 0;
 };
 
+struct NativeBind {
+	bool found = false;
+	bool ptr = false;
+	std::string owner;
+	uint32_t hash = 0;
+	std::vector<std::string> args;
+	std::vector<std::string> defaults;
+	std::string ret;
+};
+
 class ClassQuery {
 public:
 	virtual ~ClassQuery() {}
@@ -26,6 +36,8 @@ public:
 	virtual NativeMember property(const std::string &cls, const std::string &name) const = 0;
 	virtual bool int_constant(const std::string &cls, const std::string &name, int64_t &value) const = 0;
 	virtual bool is_singleton(const std::string &name) const = 0;
+	virtual NativeBind bind(const std::string &cls, const std::string &name) const = 0;
+	virtual bool accessors(const std::string &cls, const std::string &name, std::string &getter, std::string &setter) const = 0;
 	virtual bool utility(const std::string &name, std::string &ret, bool &vararg) const = 0;
 	virtual bool has_signal(const std::string &cls, const std::string &name) const = 0;
 	virtual bool global_constant(const std::string &name, int64_t &value) const = 0;

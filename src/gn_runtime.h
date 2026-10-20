@@ -65,7 +65,10 @@ Variant construct(Variant::Type type, std::initializer_list<Variant> args, const
 Variant instantiate(const StringName &cls);
 Variant singleton(const StringName &name);
 Variant load(const String &path);
-Variant static_call(const StringName &cls, const StringName &method, std::initializer_list<Variant> args, const Loc &loc);
+Variant static_call(GDExtensionMethodBindPtr mb, std::initializer_list<Variant> args, const Loc &loc);
+GDExtensionMethodBindPtr method_bind(const char *cls, const char *name, int64_t hash);
+void *raw_object(const Variant &v);
+void *live_object(const Variant &v, const Loc &loc);
 Variant builtin_static(Variant::Type type, const StringName &method, std::initializer_list<Variant> args, const Loc &loc);
 Variant builtin_constant(Variant::Type type, const StringName &name);
 Variant check_builtin(const Variant &v, Variant::Type type, const Loc &loc);
@@ -128,6 +131,20 @@ inline T cast(const Variant &v, Variant::Type t, const Loc &loc) {
 	return v.operator T();
 }
 
+template <typename R, typename... A>
+inline R pcall(GDExtensionMethodBindPtr mb, void *object, const A &...a) {
+	const void *args[] = { &a..., nullptr };
+	R r{};
+	gdextension_interface::object_method_bind_ptrcall(mb, object, args, &r);
+	return r;
+}
+
+template <typename... A>
+inline void pcall_void(GDExtensionMethodBindPtr mb, void *object, const A &...a) {
+	const void *args[] = { &a..., nullptr };
+	gdextension_interface::object_method_bind_ptrcall(mb, object, args, nullptr);
+}
+
 template <typename T>
 inline T builtin_constant_as(Variant::Type type, const StringName &name) {
 	return builtin_constant(type, name).operator T();
@@ -143,3 +160,5 @@ inline Variant builtin_constant_as<Variant>(Variant::Type type, const StringName
 #define GN_L(line) (gn::Loc{ GN_FILE, __func__, line })
 #define GN_SN(s) ([]() -> const godot::StringName & { static const godot::StringName *n = new godot::StringName(s); return *n; }())
 #define GN_BC(T, type, name) ([]() -> const T & { static const T *v = new T(gn::builtin_constant_as<T>(type, GN_SN(name))); return *v; }())
+#define GN_MB(cls, name, hash) ([]() { static const GDExtensionMethodBindPtr mb = gn::method_bind(cls, name, hash); return mb; }())
+#define GN_SINGLETON(name) ([]() -> const Variant & { static const Variant *v = new Variant(gn::singleton(GN_SN(name))); return *v; }())

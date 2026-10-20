@@ -179,7 +179,14 @@ Variant op(Variant::Operator o, const Variant &a, const Variant &b, const Loc &l
 	return r;
 }
 
+static void check_live(const Variant &base, const Loc &loc) {
+	if (base.get_type() == Variant::OBJECT && !is_instance_valid(base)) {
+		fail("Cannot use a previously freed instance.", loc);
+	}
+}
+
 Variant mcall(const Variant &base, const StringName &name, std::initializer_list<Variant> args, const Loc &loc) {
+	check_live(base, loc);
 	Variant self = base;
 	std::vector<const Variant *> ptrs;
 	for (const Variant &a : args) {
@@ -195,6 +202,7 @@ Variant mcall(const Variant &base, const StringName &name, std::initializer_list
 }
 
 Variant get_named(const Variant &base, const StringName &name, const Loc &loc) {
+	check_live(base, loc);
 	bool valid = false;
 	Variant r = base.get_named(name, valid);
 	if (!valid) {
@@ -212,14 +220,36 @@ Variant get_index(const Variant &base, const Variant &index, const Loc &loc) {
 	return r;
 }
 
-Variant static_call(const StringName &cls, const StringName &method, std::initializer_list<Variant> args, const Loc &loc) {
-	Array list;
-	list.push_back(cls);
-	list.push_back(method);
+GDExtensionMethodBindPtr method_bind(const char *cls, const char *name, int64_t hash) {
+	return gdextension_interface::classdb_get_method_bind(StringName(cls)._native_ptr(), StringName(name)._native_ptr(), hash);
+}
+
+Variant static_call(GDExtensionMethodBindPtr mb, std::initializer_list<Variant> args, const Loc &loc) {
+	std::vector<GDExtensionConstVariantPtr> ptrs;
 	for (const Variant &a : args) {
-		list.push_back(a);
+		ptrs.push_back(a._native_ptr());
 	}
-	return ClassDBSingleton::get_singleton()->callv(GN_SN("class_call_static"), list);
+	Variant r;
+	GDExtensionCallError e = {};
+	gdextension_interface::object_method_bind_call(mb, nullptr, ptrs.data(), ptrs.size(), r._native_ptr(), &e);
+	if (e.error != GDEXTENSION_CALL_OK) {
+		fail("Invalid static call.", loc);
+	}
+	return r;
+}
+
+void *raw_object(const Variant &v) {
+	static const GDExtensionTypeFromVariantConstructorFunc read = gdextension_interface::get_variant_to_type_constructor(GDEXTENSION_VARIANT_TYPE_OBJECT);
+	GDExtensionObjectPtr o = nullptr;
+	read(&o, const_cast<Variant &>(v)._native_ptr());
+	return o;
+}
+
+void *live_object(const Variant &v, const Loc &loc) {
+	if (!is_instance_valid(v)) {
+		fail(v.get_type() == Variant::NIL ? "Cannot call a method on a null value." : "Cannot call a method on a previously freed instance.", loc);
+	}
+	return raw_object(v);
 }
 
 Variant builtin_static(Variant::Type type, const StringName &method, std::initializer_list<Variant> args, const Loc &loc) {
@@ -441,6 +471,7 @@ bool is_instance_of(const Variant &v, const Variant &type) {
 }
 
 void set_named(Variant &base, const StringName &name, const Variant &value, const Loc &loc) {
+	check_live(base, loc);
 	bool valid = false;
 	base.set_named(name, value, valid);
 	if (!valid) {
