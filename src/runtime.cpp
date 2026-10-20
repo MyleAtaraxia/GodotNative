@@ -252,6 +252,44 @@ void *live_object(const Variant &v, const Loc &loc) {
 	return raw_object(v);
 }
 
+class Lambda : public CallableCustom {
+	ObjectID id;
+	int required, total;
+	std::function<Variant(const Variant **, int)> body;
+
+	static bool same(const CallableCustom *a, const CallableCustom *b) { return a == b; }
+	static bool less(const CallableCustom *a, const CallableCustom *b) { return a < b; }
+
+public:
+	Lambda(Object *owner, int p_required, int p_total, std::function<Variant(const Variant **, int)> p_body) :
+			id(owner->get_instance_id()), required(p_required), total(p_total), body(std::move(p_body)) {}
+	uint32_t hash() const override { return uint32_t(uintptr_t(this) >> 3); }
+	String get_as_text() const override { return "<lambda>"; }
+	CompareEqualFunc get_compare_equal_func() const override { return same; }
+	CompareLessFunc get_compare_less_func() const override { return less; }
+	ObjectID get_object() const override { return id; }
+	int get_argument_count(bool &valid) const override {
+		valid = true;
+		return total;
+	}
+	void call(const Variant **args, int count, Variant &ret, GDExtensionCallError &error) const override {
+		if (count < required || count > total) {
+			error.error = count < required ? GDEXTENSION_CALL_ERROR_TOO_FEW_ARGUMENTS : GDEXTENSION_CALL_ERROR_TOO_MANY_ARGUMENTS;
+			error.expected = count < required ? required : total;
+			return;
+		}
+		error.error = GDEXTENSION_CALL_OK;
+		try {
+			ret = body(args, count);
+		} catch (const gn::Abort &) {
+		}
+	}
+};
+
+Variant lambda(Object *owner, int required, int total, std::function<Variant(const Variant **, int)> body) {
+	return Callable(memnew(Lambda(owner, required, total, std::move(body))));
+}
+
 Variant builtin_static(Variant::Type type, const StringName &method, std::initializer_list<Variant> args, const Loc &loc) {
 	std::vector<const Variant *> ptrs;
 	for (const Variant &a : args) {

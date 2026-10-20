@@ -1,5 +1,7 @@
 #pragma once
 
+#include <functional>
+
 #include <godot_cpp/classes/object.hpp>
 #include <godot_cpp/core/math.hpp>
 #include <godot_cpp/variant/string_name.hpp>
@@ -84,6 +86,7 @@ bool match_array(const Variant &value, int64_t size, bool rest);
 bool match_dict(const Variant &value, int64_t size, bool rest);
 bool has_key(const Variant &value, const Variant &key);
 Array iter_list(const Variant &v, const Loc &loc);
+Variant lambda(Object *owner, int required, int total, std::function<Variant(const Variant **, int)> body);
 int64_t len(const Variant &v, const Loc &loc);
 Array range(std::initializer_list<int64_t> args, const Loc &loc);
 String chr(int64_t code);

@@ -46,6 +46,8 @@ std::vector<Tok> tokenize(const std::string &src) {
 	size_t i = 0;
 	int line = 1, parens = 0;
 	bool bol = true;
+	std::vector<int> pending_lambdas;
+	std::vector<std::pair<int, size_t>> lambda_blocks;
 	while (i < src.size()) {
 		if (bol && parens == 0) {
 			int w = 0;
@@ -71,11 +73,24 @@ std::vector<Tok> tokenize(const std::string &src) {
 			while (w < indents.back()) {
 				indents.pop_back();
 				out.push_back({ TK::Dedent, "", line });
+				if (!lambda_blocks.empty() && lambda_blocks.back().second == indents.size()) {
+					parens = lambda_blocks.back().first;
+					lambda_blocks.pop_back();
+					break;
+				}
 			}
 			bol = false;
 		}
 		char c = src[i];
 		if (c == '\n') {
+			while (!pending_lambdas.empty() && pending_lambdas.back() > parens) {
+				pending_lambdas.pop_back();
+			}
+			if (parens > 0 && !pending_lambdas.empty() && pending_lambdas.back() == parens && !out.empty() && out.back().s == ":") {
+				pending_lambdas.pop_back();
+				lambda_blocks.push_back({ parens, indents.size() });
+				parens = 0;
+			}
 			if (parens == 0) {
 				out.push_back({ TK::NL, "", line });
 				bol = true;
@@ -94,6 +109,9 @@ std::vector<Tok> tokenize(const std::string &src) {
 				i++;
 			}
 			out.push_back({ TK::Id, src.substr(b, i - b), line });
+			if (parens > 0 && out.back().s == "func") {
+				pending_lambdas.push_back(parens);
+			}
 		} else if (isdigit((unsigned char)c)) {
 			std::string n;
 			bool flt = false;
@@ -359,6 +377,8 @@ class Compiler {
 	std::map<std::string, Const> consts;
 	TypeRef last_ref;
 	bool next_onready = false;
+	size_t lambda_end = size_t(-1);
+	int lambda_inline = 0;
 	std::set<std::string> warnings;
 
 	std::vector<std::map<std::string, Local>> scopes;
@@ -389,6 +409,12 @@ class Compiler {
 		return t[p++].s;
 	}
 	void nl() {
+		if (p == lambda_end) {
+			return;
+		}
+		if (lambda_inline > 0 && (is(")") || is(",") || is("]") || is("}"))) {
+			return;
+		}
 		if (tk().k != TK::NL) {
 			throw Err{ ln(), "expected end of line, found '" + tk().s + "'" };
 		}
@@ -916,6 +942,81 @@ class Compiler {
 		return unsafe ? "gn::raw_object(" + v + ")" : "gn::live_object(" + v + ", " + L(line) + ")";
 	}
 
+	E lambda(int line) {
+		Fn fn;
+		fn.ret = Ty::Var;
+		fn.name = "lambda";
+		fn.line = line;
+		if (tk().k == TK::Id) {
+			p++;
+		}
+		expect("(");
+		const Fn *saved_cur = cur;
+		std::string saved_out;
+		saved_out.swap(out);
+		cur = &fn;
+		scopes.emplace_back();
+		int index = 0, required = 0;
+		std::string head;
+		while (!is(")")) {
+			std::string name = ident();
+			Ty ty = Ty::Var;
+			TypeRef ref;
+			if (eat(":")) {
+				ty = parse_type();
+				ref = last_ref;
+			}
+			std::string at = "*args[" + std::to_string(index) + "]";
+			std::string value = ty == Ty::Var ? guard(at, ref, L(line)) : unsafe ? "(" + at + ").operator " + cty(ty) + "()" : std::string("gn::cast<") + cty(ty) + ">(" + at + ", Variant::" + vty(ty) + ", " + L(line) + ")";
+			if (eat("=")) {
+				value = "argc > " + std::to_string(index) + " ? " + value + " : " + conv(expr(), ty, line);
+			} else {
+				required++;
+			}
+			head += std::string(cty(ty)) + " l_" + name + " = " + value + ";\n";
+			declare(name, ty, false, "", ref);
+			index++;
+			if (!eat(",")) {
+				break;
+			}
+		}
+		expect(")");
+		if (eat("->")) {
+			parse_type();
+		}
+		expect(":");
+		scopes.emplace_back();
+		if (tk().k == TK::NL) {
+			p++;
+			if (tk().k != TK::Indent) {
+				throw Err{ ln(), "expected an indented block" };
+			}
+			p++;
+			int inline_saved = lambda_inline;
+			lambda_inline = 0;
+			while (tk().k != TK::Dedent) {
+				stmt();
+			}
+			lambda_inline = inline_saved;
+			p++;
+		} else {
+			lambda_inline++;
+			stmt();
+			lambda_inline--;
+		}
+		lambda_end = p;
+		scopes.pop_back();
+		scopes.pop_back();
+		std::string body;
+		body.swap(out);
+		out.swap(saved_out);
+		cur = saved_cur;
+		std::string code = "gn::lambda(owner, " + std::to_string(required) + ", " + std::to_string(index) + ", [=](const Variant **args, int argc) -> Variant {\nauto run = [=]() mutable -> Variant {\n" + head + body + "return {};\n};\nreturn run();\n})";
+		E e{ code, Ty::Var };
+		e.ref.builtin = "CALLABLE";
+		return e;
+	}
+
 	bool global_call(const std::string &n, E &r, int line) {
 		static const std::set<std::string> f1 = { "sqrt", "sin", "cos", "tan", "exp", "log" };
 		static const std::map<std::string, Ty> ctors = { { "Vector3", Ty::V3 }, { "Vector2", Ty::V2 }, { "PackedFloat64Array", Ty::PF64 }, { "PackedInt64Array", Ty::PI64 }, { "Array", Ty::Arr }, { "Dictionary", Ty::Dict } };
@@ -1221,7 +1322,11 @@ class Compiler {
 			throw Err{ line, "unsupported expression at '" + tok.s + "'" };
 		}
 		const std::string &n = tok.s;
-		if (n == "await" || n == "func" || n == "yield") {
+		if (n == "func") {
+			p++;
+			return lambda(line);
+		}
+		if (n == "await" || n == "yield") {
 			throw Err{ line, "'" + n + "' is not supported in a native file" };
 		}
 		if (n == "super") {
@@ -1870,17 +1975,28 @@ class Compiler {
 		p++;
 	}
 
-	void skip_block() {
-		skip_line();
-		if (tk().k != TK::Indent) {
-			throw Err{ ln(), "expected an indented block" };
-		}
+	void skip_indented() {
 		int d = 0;
 		do {
 			d += tk().k == TK::Indent;
 			d -= tk().k == TK::Dedent;
 			p++;
 		} while (d > 0);
+	}
+
+	void skip_block() {
+		skip_line();
+		if (tk().k != TK::Indent) {
+			throw Err{ ln(), "expected an indented block" };
+		}
+		skip_indented();
+	}
+
+	void skip_value() {
+		skip_line();
+		if (tk().k == TK::Indent) {
+			skip_indented();
+		}
 	}
 
 	void top_level() {
@@ -1961,7 +2077,7 @@ class Compiler {
 					expect("=");
 				}
 				m.init = p;
-				skip_line();
+				skip_value();
 				pending_consts.push_back(m);
 			} else if (eat("@")) {
 				std::string a = ident();
@@ -1988,7 +2104,7 @@ class Compiler {
 					m.init = p;
 					m.declared = true;
 					m.t = Ty::Void;
-					skip_line();
+					skip_value();
 				} else {
 					if (eat(":")) {
 						m.t = parse_type();
@@ -2000,7 +2116,7 @@ class Compiler {
 					} else {
 						expect("=");
 						m.init = p;
-						skip_line();
+						skip_value();
 					}
 				}
 				if (!m.declared) {
@@ -2110,9 +2226,10 @@ class Compiler {
 	}
 
 	std::string emit_fn(const Fn &f) {
-		cur = &f;
 		for (;;) {
 			try {
+				cur = &f;
+				lambda_inline = 0;
 				out.clear();
 				tmp = 0;
 				scopes.clear();
