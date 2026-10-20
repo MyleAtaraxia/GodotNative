@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstdint>
 #include <map>
 #include <string>
 #include <vector>
@@ -22,6 +23,8 @@ public:
 	virtual bool class_exists(const std::string &name) const = 0;
 	virtual NativeMember method(const std::string &cls, const std::string &name) const = 0;
 	virtual NativeMember property(const std::string &cls, const std::string &name) const = 0;
+	virtual bool int_constant(const std::string &cls, const std::string &name, int64_t &value) const = 0;
+	virtual bool is_singleton(const std::string &name) const = 0;
 };
 
 class ProjectQuery : public ClassQuery {

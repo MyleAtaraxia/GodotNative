@@ -1,6 +1,7 @@
 #include <runtime.h>
 
 #include <godot_cpp/classes/class_db_singleton.hpp>
+#include <godot_cpp/classes/engine.hpp>
 #include <godot_cpp/classes/resource_loader.hpp>
 #include <godot_cpp/core/class_db.hpp>
 #include <godot_cpp/core/error_macros.hpp>
@@ -191,6 +192,40 @@ Variant get_index(const Variant &base, const Variant &index, const Loc &loc) {
 		fail("Out of bounds get index.", loc);
 	}
 	return r;
+}
+
+void set_named(Variant &base, const StringName &name, const Variant &value, const Loc &loc) {
+	bool valid = false;
+	base.set_named(name, value, valid);
+	if (!valid) {
+		fail("Invalid assignment to property.", loc);
+	}
+}
+
+Variant construct(Variant::Type type, std::initializer_list<Variant> args, const Loc &loc) {
+	std::vector<const Variant *> ptrs;
+	for (const Variant &a : args) {
+		ptrs.push_back(&a);
+	}
+	Variant r;
+	GDExtensionCallError e = {};
+	gdextension_interface::variant_construct((GDExtensionVariantType)type, r._native_ptr(), (const void *const *)ptrs.data(), ptrs.size(), &e);
+	if (e.error != GDEXTENSION_CALL_OK) {
+		fail("Invalid constructor arguments.", loc);
+	}
+	return r;
+}
+
+Variant instantiate(const StringName &cls) {
+	return ClassDBSingleton::get_singleton()->instantiate(cls);
+}
+
+Variant singleton(const StringName &name) {
+	return Engine::get_singleton()->call(GN_SN("get_singleton"), name);
+}
+
+Variant load(const String &path) {
+	return ResourceLoader::get_singleton()->call(GN_SN("load"), path);
 }
 
 void set_index(Variant &base, const Variant &index, const Variant &value, const Loc &loc) {

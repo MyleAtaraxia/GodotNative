@@ -5,6 +5,7 @@
 #include <godot_cpp/classes/editor_export_plugin.hpp>
 #include <godot_cpp/classes/editor_plugin.hpp>
 #include <godot_cpp/classes/editor_plugin_registration.hpp>
+#include <godot_cpp/classes/engine.hpp>
 #include <godot_cpp/classes/file_access.hpp>
 #include <godot_cpp/classes/os.hpp>
 #include <godot_cpp/classes/project_settings.hpp>
@@ -69,6 +70,17 @@ public:
 			}
 		}
 		return r;
+	}
+	bool int_constant(const std::string &cls, const std::string &name, int64_t &value) const override {
+		ClassDBSingleton *db = ClassDBSingleton::get_singleton();
+		if (!db->class_has_integer_constant(cls.c_str(), name.c_str())) {
+			return false;
+		}
+		value = db->class_get_integer_constant(cls.c_str(), name.c_str());
+		return true;
+	}
+	bool is_singleton(const std::string &name) const override {
+		return Engine::get_singleton()->has_singleton(name.c_str());
 	}
 	bool read(const std::string &path, std::string &source) const override {
 		String p = path.c_str();

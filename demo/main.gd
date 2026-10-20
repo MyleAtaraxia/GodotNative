@@ -1,3 +1,4 @@
+#pragma native
 extends Node2D
 
 const SIZE := Vector2(1280, 720)
@@ -72,6 +73,7 @@ func _process(_delta: float) -> void:
 		MODES[mode][0], sim.get_script().get_class(), count, sim_ms, Engine.get_frames_per_second()]
 
 func bench() -> void:
+	print("BOIDS main.gd runs as ", get_script().get_class())
 	var base := 0.0
 	for i in range(MODES.size()):
 		var s := make_sim(i, count)

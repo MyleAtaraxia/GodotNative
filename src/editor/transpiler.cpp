@@ -284,6 +284,38 @@ const std::vector<KnownMethod> &known_methods() {
 	return k;
 }
 
+struct KnownUtility {
+	const char *name;
+	std::vector<Ty> args;
+	Ty ret;
+};
+
+const std::vector<KnownUtility> &known_utilities() {
+	const Ty F = Ty::Float, I = Ty::Int, B = Ty::Bool;
+	static const std::vector<KnownUtility> k = {
+		{ "lerpf", { F, F, F }, F }, { "minf", { F, F }, F }, { "maxf", { F, F }, F }, { "clampf", { F, F, F }, F }, { "absf", { F }, F }, { "signf", { F }, F },
+		{ "mini", { I, I }, I }, { "maxi", { I, I }, I }, { "clampi", { I, I, I }, I }, { "absi", { I }, I }, { "signi", { I }, I },
+		{ "floorf", { F }, F }, { "ceilf", { F }, F }, { "roundf", { F }, F }, { "floori", { F }, I }, { "ceili", { F }, I }, { "roundi", { F }, I },
+		{ "asin", { F }, F }, { "acos", { F }, F }, { "atan", { F }, F }, { "atan2", { F, F }, F }, { "sinh", { F }, F }, { "cosh", { F }, F }, { "tanh", { F }, F },
+		{ "pow", { F, F }, F }, { "fmod", { F, F }, F }, { "fposmod", { F, F }, F }, { "posmod", { I, I }, I }, { "snappedf", { F, F }, F },
+		{ "wrapf", { F, F, F }, F }, { "wrapi", { I, I, I }, I }, { "move_toward", { F, F, F }, F }, { "smoothstep", { F, F, F }, F }, { "inverse_lerp", { F, F, F }, F },
+		{ "deg_to_rad", { F }, F }, { "rad_to_deg", { F }, F }, { "is_nan", { F }, B }, { "is_inf", { F }, B },
+		{ "randf", {}, F }, { "randi", {}, I }, { "randf_range", { F, F }, F }, { "randi_range", { I, I }, I },
+	};
+	return k;
+}
+
+const std::map<std::string, std::string> &builtin_ctors() {
+	static const std::map<std::string, std::string> k = {
+		{ "Vector2i", "VECTOR2I" }, { "Vector3i", "VECTOR3I" }, { "Vector4", "VECTOR4" }, { "Vector4i", "VECTOR4I" }, { "Rect2", "RECT2" }, { "Rect2i", "RECT2I" },
+		{ "Transform2D", "TRANSFORM2D" }, { "Transform3D", "TRANSFORM3D" }, { "Plane", "PLANE" }, { "Quaternion", "QUATERNION" }, { "AABB", "AABB" }, { "Basis", "BASIS" },
+		{ "Projection", "PROJECTION" }, { "Color", "COLOR" }, { "StringName", "STRING_NAME" }, { "NodePath", "NODE_PATH" }, { "PackedByteArray", "PACKED_BYTE_ARRAY" },
+		{ "PackedInt32Array", "PACKED_INT32_ARRAY" }, { "PackedFloat32Array", "PACKED_FLOAT32_ARRAY" }, { "PackedStringArray", "PACKED_STRING_ARRAY" },
+		{ "PackedVector2Array", "PACKED_VECTOR2_ARRAY" }, { "PackedVector3Array", "PACKED_VECTOR3_ARRAY" }, { "PackedColorArray", "PACKED_COLOR_ARRAY" }, { "PackedVector4Array", "PACKED_VECTOR4_ARRAY" },
+	};
+	return k;
+}
+
 class Compiler {
 	std::vector<Tok> t;
 	size_t p = 0;
@@ -292,7 +324,7 @@ class Compiler {
 	bool unsafe;
 	bool resolved = false;
 
-	std::string base = "RefCounted", global, const_block;
+	std::string base = "RefCounted", global, const_block, const_defs;
 	Fn init_fn;
 	std::vector<Fn> fns;
 	std::vector<Member> members;
@@ -716,19 +748,51 @@ class Compiler {
 			r = { "int64_t(gn::mcall(" + conv(a[0], Ty::Var, line) + ", GN_SN(\"size\"), {}, " + L(line) + "))", Ty::Int };
 			return true;
 		}
+		if (n == "load") {
+			p += 2;
+			std::vector<E> a = args();
+			if (a.size() != 1) {
+				throw Err{ line, "load takes one argument" };
+			}
+			r = { "gn::load(" + conv(a[0], Ty::Str, line) + ")", Ty::Var };
+			return true;
+		}
+		for (const KnownUtility &u : known_utilities()) {
+			if (n == u.name) {
+				p += 2;
+				std::vector<E> a = args();
+				if (a.size() != u.args.size()) {
+					throw Err{ line, n + " takes " + std::to_string(u.args.size()) + " argument(s)" };
+				}
+				std::string s = "UtilityFunctions::" + n + "(";
+				for (size_t i = 0; i < a.size(); i++) {
+					s += (i ? ", " : "") + conv(a[i], u.args[i], line);
+				}
+				r = { std::string(cty(u.ret)) + "(" + s + "))", u.ret };
+				return true;
+			}
+		}
 		auto c = ctors.find(n);
 		if (c != ctors.end()) {
 			p += 2;
 			std::vector<E> a = args();
-			Ty each = c->second == Ty::V3 || c->second == Ty::V2 ? Ty::Float : Ty::Void;
+			bool vector = c->second == Ty::V3 || c->second == Ty::V2;
+			if (!vector && !a.empty()) {
+				r = { std::string("(gn::construct(Variant::") + vty(c->second) + ", {" + var_args(a, line) + "}, " + L(line) + ")).operator " + cty(c->second) + "()", c->second };
+				return true;
+			}
 			std::string s = std::string(cty(c->second)) + "(";
 			for (size_t i = 0; i < a.size(); i++) {
-				if (each == Ty::Void) {
-					throw Err{ line, n + " constructor arguments are not supported" };
-				}
-				s += (i ? ", " : "") + ("real_t(" + conv(a[i], each, line) + ")");
+				s += (i ? ", " : "") + ("real_t(" + conv(a[i], Ty::Float, line) + ")");
 			}
 			r = { s + ")", c->second };
+			return true;
+		}
+		auto b = builtin_ctors().find(n);
+		if (b != builtin_ctors().end()) {
+			p += 2;
+			std::vector<E> a = args();
+			r = { "gn::construct(Variant::" + b->second + ", {" + var_args(a, line) + "}, " + L(line) + ")", Ty::Var };
 			return true;
 		}
 		return false;
@@ -808,6 +872,10 @@ class Compiler {
 			p++;
 			return { n == "PI" ? "double(Math_PI)" : "double(Math_TAU)", Ty::Float };
 		}
+		if (n == "INF" || n == "NAN") {
+			p++;
+			return { n == "INF" ? "double(INFINITY)" : "double(NAN)", Ty::Float };
+		}
 		if (n == "self") {
 			p++;
 			if (is(".")) {
@@ -830,6 +898,27 @@ class Compiler {
 				return { "Vector3(0, 1, 0)", Ty::V3 };
 			}
 			throw Err{ line, "unsupported Vector3 constant " + m };
+		}
+		if (t[p + 1].k == TK::Op && t[p + 1].s == "." && !find_local(n) && !find_member(n) && !find_const(n) && classes.class_exists(n)) {
+			const std::string m = t[p + 2].s;
+			int64_t value = 0;
+			if (m == "new") {
+				p += 3;
+				expect("(");
+				if (!args().empty()) {
+					throw Err{ line, n + ".new() takes no arguments" };
+				}
+				return { "gn::instantiate(GN_SN(\"" + n + "\"))", Ty::Var };
+			}
+			if (classes.int_constant(n, m, value)) {
+				p += 3;
+				return { "int64_t(" + std::to_string(value) + "LL)", Ty::Int };
+			}
+			if (classes.is_singleton(n)) {
+				p++;
+				return { "gn::singleton(GN_SN(\"" + n + "\"))", Ty::Var };
+			}
+			throw Err{ line, "static member " + n + "." + m + " is not supported" };
 		}
 		if (t[p + 1].k == TK::Op && t[p + 1].s == "(") {
 			if (find_fn(n) == nullptr) {
@@ -927,7 +1016,19 @@ class Compiler {
 			}
 			return e;
 		}
-		return { "gn::get_named(" + conv(b, Ty::Var, line) + ", GN_SN(\"" + n + "\"), " + L(line) + ")", Ty::Var };
+		std::string name = "GN_SN(\"" + n + "\")";
+		E e{ "gn::get_named(" + conv(b, Ty::Var, line) + ", " + name + ", " + L(line) + ")", Ty::Var };
+		std::string s = temp();
+		e.set = "[&]() { Variant " + s + " = " + conv(b, Ty::Var, line) + "; gn::set_named(" + s + ", " + name + ", %v, " + L(line) + ");" + write_back(b, s) + " }()";
+		return e;
+	}
+
+	std::string write_back(const E &b, const std::string &s) {
+		if (b.set.empty()) {
+			return "";
+		}
+		std::string value = b.t == Ty::Var ? s : s + ".operator " + cty(b.t) + "()";
+		return " if (" + s + ".get_type() != Variant::OBJECT) { " + subst(b.set, value) + "; }";
 	}
 
 	E index(const E &b, const E &i, int line) {
@@ -946,7 +1047,8 @@ class Compiler {
 		if (b.t == Ty::Var && b.lv) {
 			sets = "gn::set_index(" + b.c + ", " + v + ", %v, " + L(line) + ")";
 		} else {
-			sets = "[&]() { Variant s = " + conv(b, Ty::Var, line) + "; gn::set_index(s, " + v + ", %v, " + L(line) + "); }()";
+			std::string s = temp();
+			sets = "[&]() { Variant " + s + " = " + conv(b, Ty::Var, line) + "; gn::set_index(" + s + ", " + v + ", %v, " + L(line) + ");" + write_back(b, s) + " }()";
 		}
 		return { "gn::get_index(" + conv(b, Ty::Var, line) + ", " + v + ", " + L(line) + ")", Ty::Var, sets };
 	}
@@ -1310,11 +1412,15 @@ class Compiler {
 			p = m.init;
 			E e = expr();
 			Ty ty = m.declared ? m.t : e.t;
-			if (ty != Ty::Int && ty != Ty::Float && ty != Ty::Bool) {
-				throw Err{ m.line, "only int, float and bool constants are supported" };
+			std::string value = conv(e, ty, m.line);
+			if ((ty == Ty::Int || ty == Ty::Float || ty == Ty::Bool) && value.find("()") == std::string::npos) {
+				out += std::string("\tstatic inline const ") + cty(ty) + " k_" + m.name + " = " + value + ";\n";
+				consts[m.name] = { "k_" + m.name, ty };
+				continue;
 			}
-			out += std::string("\tstatic inline const ") + cty(ty) + " k_" + m.name + " = " + conv(e, ty, m.line) + ";\n";
-			consts[m.name] = { "k_" + m.name, ty };
+			out += std::string("\tstatic const ") + cty(ty) + " &k_" + m.name + "();\n";
+			const_defs += std::string("const ") + cty(ty) + " &C::k_" + m.name + "() {\n\tstatic const " + cty(ty) + " *v = new " + cty(ty) + "(" + value + ");\n\treturn *v;\n}\n\n";
+			consts[m.name] = { "k_" + m.name + "()", ty };
 		}
 		unsafe = checked;
 		for (Member &m : members) {
@@ -1480,7 +1586,7 @@ public:
 		header += const_block + decl + "\tvoid init();\n};\n\n} // namespace gn_gen\n";
 
 		source = "// Generated by GodotNative from " + path + ". Do not edit.\n#define GN_FILE \"" + path + "\"\n#include \"" + id + ".gen.h\"\n\nnamespace gn_gen {\n\nusing C = " + self + ";\n\n";
-		source += "void C::init() {\n" + (parent ? parent->struct_name() + "::init();\n" : std::string()) + members_init + "}\n\n" + defs;
+		source += const_defs + "void C::init() {\n" + (parent ? parent->struct_name() + "::init();\n" : std::string()) + members_init + "}\n\n" + defs;
 		source += "namespace {\n\nconst gn::Method methods[] = {\n" + mtab + "\t{ nullptr, 0, nullptr },\n};\n";
 		source += "const gn::Prop props[] = {\n" + ptab + "\t{ nullptr, GDEXTENSION_VARIANT_TYPE_NIL, nullptr, nullptr },\n};\n\n";
 		source += "void *create(Object *owner) {\n\tC *c = new C();\n\tc->owner = owner;\n\tc->init();\n" + call_init + "\treturn c;\n}\n\n";

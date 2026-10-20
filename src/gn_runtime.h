@@ -57,6 +57,11 @@ Variant mcall(const Variant &base, const StringName &name, std::initializer_list
 Variant get_named(const Variant &base, const StringName &name, const Loc &loc);
 Variant get_index(const Variant &base, const Variant &index, const Loc &loc);
 void set_index(Variant &base, const Variant &index, const Variant &value, const Loc &loc);
+void set_named(Variant &base, const StringName &name, const Variant &value, const Loc &loc);
+Variant construct(Variant::Type type, std::initializer_list<Variant> args, const Loc &loc);
+Variant instantiate(const StringName &cls);
+Variant singleton(const StringName &name);
+Variant load(const String &path);
 
 inline int64_t add(int64_t a, int64_t b) { return int64_t(uint64_t(a) + uint64_t(b)); }
 inline int64_t sub(int64_t a, int64_t b) { return int64_t(uint64_t(a) - uint64_t(b)); }
