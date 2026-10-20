@@ -1,6 +1,11 @@
 #pragma once
 
+#include <godot_cpp/classes/ref.hpp>
+#include <godot_cpp/classes/ref_counted.hpp>
+
+#include <coroutine>
 #include <functional>
+#include <memory>
 
 #include <godot_cpp/classes/object.hpp>
 #include <godot_cpp/core/math.hpp>
@@ -116,6 +121,11 @@ inline int64_t imod(int64_t a, int64_t b, const Loc &loc) {
 	return b == -1 ? 0 : a % b;
 }
 
+template <typename T>
+inline int64_t wrap(int64_t i, const T &list) {
+	return i < 0 ? i + list.size() : i;
+}
+
 inline int64_t index(int64_t i, int64_t size, const Loc &loc) {
 	int64_t r = i < 0 ? i + size : i;
 	if (r < 0 || r >= size) {
@@ -133,6 +143,35 @@ inline T cast(const Variant &v, Variant::Type t, const Loc &loc) {
 	}
 	return v.operator T();
 }
+
+struct Task {
+	struct promise_type {
+		Variant result;
+		Ref<RefCounted> state;
+		std::shared_ptr<void> keep;
+		Task get_return_object() { return { std::coroutine_handle<promise_type>::from_promise(*this) }; }
+		std::suspend_never initial_suspend() noexcept { return {}; }
+		std::suspend_always final_suspend() noexcept { return {}; }
+		void return_value(const Variant &v) { result = v; }
+		void unhandled_exception() {}
+	};
+	std::coroutine_handle<promise_type> handle;
+};
+
+struct Wait {
+	Object *owner;
+	Variant value;
+	Variant result;
+	bool await_ready();
+	void await_suspend(std::coroutine_handle<Task::promise_type> handle);
+	Variant await_resume() { return result; }
+};
+
+inline Wait wait(Object *owner, const Variant &value) {
+	return { owner, value, Variant() };
+}
+
+Variant run(Task task, std::shared_ptr<void> keep = nullptr);
 
 template <typename R, typename... A>
 inline R pcall(GDExtensionMethodBindPtr mb, void *object, const A &...a) {

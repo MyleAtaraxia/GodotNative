@@ -274,6 +274,9 @@ struct Fn {
 	TypeRef ret_ref;
 	size_t body = 0;
 	int line = 0;
+	Ty declared = Ty::Var;
+	bool coroutine = false;
+	bool async_shape = false;
 	int required() const {
 		int n = 0;
 		for (const Param &a : params) {
@@ -463,11 +466,11 @@ class Compiler {
 	}
 
 	std::string guard(const std::string &v, const TypeRef &r, const std::string &loc) const {
-		if (unsafe) {
-			return v;
-		}
 		if (!r.builtin.empty()) {
 			return "gn::check_builtin(" + v + ", Variant::" + r.builtin + ", " + loc + ")";
+		}
+		if (unsafe) {
+			return v;
 		}
 		if (!r.cls.empty()) {
 			return "gn::check_class(" + v + ", GN_SN(\"" + r.cls + "\"), " + loc + ")";
@@ -824,7 +827,9 @@ class Compiler {
 			s += (i ? ", " : "") + guarded(a[i], f->params[i].t, f->params[i].ref, line);
 		}
 		E e{ s + ")", f->ret };
-		e.ref = f->ret_ref;
+		if (!f->async_shape) {
+			e.ref = f->ret_ref;
+		}
 		return e;
 	}
 
@@ -945,6 +950,7 @@ class Compiler {
 	E lambda(int line) {
 		Fn fn;
 		fn.ret = Ty::Var;
+		fn.declared = Ty::Var;
 		fn.name = "lambda";
 		fn.line = line;
 		if (tk().k == TK::Id) {
@@ -985,6 +991,7 @@ class Compiler {
 			parse_type();
 		}
 		expect(":");
+		fn.coroutine = lambda_awaits();
 		scopes.emplace_back();
 		if (tk().k == TK::NL) {
 			p++;
@@ -1011,10 +1018,48 @@ class Compiler {
 		body.swap(out);
 		out.swap(saved_out);
 		cur = saved_cur;
-		std::string code = "gn::lambda(owner, " + std::to_string(required) + ", " + std::to_string(index) + ", [=](const Variant **args, int argc) -> Variant {\nauto run = [=]() mutable -> Variant {\n" + head + body + "return {};\n};\nreturn run();\n})";
+		std::string code = "gn::lambda(owner, " + std::to_string(required) + ", " + std::to_string(index) + ", [=](const Variant **args, int argc) -> Variant {\n";
+		if (fn.coroutine) {
+			code += "auto run = std::make_shared<std::function<gn::Task()>>([=]() mutable -> gn::Task {\n" + head + body + "co_return Variant();\n});\nreturn gn::run((*run)(), run);\n})";
+		} else {
+			code += "auto run = [=]() mutable -> Variant {\n" + head + body + "return {};\n};\nreturn run();\n})";
+		}
 		E e{ code, Ty::Var };
 		e.ref.builtin = "CALLABLE";
 		return e;
+	}
+
+	bool awaits_between(size_t from, size_t to) const {
+		for (size_t q = from; q < to; q++) {
+			if (t[q].k == TK::Id && t[q].s == "await") {
+				return true;
+			}
+		}
+		return false;
+	}
+
+	bool lambda_awaits() const {
+		size_t q = p;
+		int depth = 0;
+		if (t[q].k == TK::NL) {
+			q++;
+			do {
+				depth += t[q].k == TK::Indent;
+				depth -= t[q].k == TK::Dedent;
+				q++;
+			} while (depth > 0 && t[q].k != TK::Eof);
+			return awaits_between(p, q);
+		}
+		while (t[q].k != TK::NL && t[q].k != TK::Eof) {
+			const std::string &o = t[q].s;
+			if (depth == 0 && (o == ")" || o == "," || o == "]" || o == "}")) {
+				break;
+			}
+			depth += o == "(" || o == "[" || o == "{";
+			depth -= o == ")" || o == "]" || o == "}";
+			q++;
+		}
+		return awaits_between(p, q);
 	}
 
 	bool global_call(const std::string &n, E &r, int line) {
@@ -1326,7 +1371,17 @@ class Compiler {
 			p++;
 			return lambda(line);
 		}
-		if (n == "await" || n == "yield") {
+		if (n == "await") {
+			if (!cur || !cur->coroutine) {
+				throw Err{ line, "await is only supported inside functions" };
+			}
+			p++;
+			E value = e_unary();
+			std::string v = temp();
+			out += "Variant " + v + " = co_await gn::wait(owner, " + conv(value, Ty::Var, line) + ");\n";
+			return { v, Ty::Var };
+		}
+		if (n == "yield") {
 			throw Err{ line, "'" + n + "' is not supported in a native file" };
 		}
 		if (n == "super") {
@@ -1604,9 +1659,7 @@ class Compiler {
 		bool packed = b.t == Ty::PF64 || b.t == Ty::PI64;
 		if ((packed || b.t == Ty::Arr) && b.lv) {
 			std::string idx = conv(i, Ty::Int, line);
-			if (!unsafe) {
-				idx = "gn::index(" + idx + ", " + b.c + ".size(), " + L(line) + ")";
-			}
+			idx = unsafe ? "gn::wrap(" + idx + ", " + b.c + ")" : "gn::index(" + idx + ", " + b.c + ".size(), " + L(line) + ")";
 			if (packed) {
 				return { b.c + ".ptr()[" + idx + "]", b.t == Ty::PF64 ? Ty::Float : Ty::Int, "(" + b.c + ".ptrw()[" + idx + "] = %v)" };
 			}
@@ -1857,10 +1910,19 @@ class Compiler {
 		expect(":");
 		out += "if (" + truth(c) + ") ";
 		block();
+		int closes = 0;
 		while (eat("elif")) {
+			size_t mark = out.size();
 			E e = expr();
 			expect(":");
-			out += "else if (" + truth(e) + ") ";
+			std::string hoisted = out.substr(mark);
+			out.erase(mark);
+			if (hoisted.empty()) {
+				out += "else if (" + truth(e) + ") ";
+			} else {
+				out += "else {\n" + hoisted + "if (" + truth(e) + ") ";
+				closes++;
+			}
 			block();
 		}
 		if (eat("else")) {
@@ -1868,6 +1930,7 @@ class Compiler {
 			out += "else ";
 			block();
 		}
+		out += std::string(closes, '}');
 	}
 
 	void stmt() {
@@ -1889,10 +1952,19 @@ class Compiler {
 			return;
 		}
 		if (eat("while")) {
+			size_t mark = out.size();
 			E c = expr();
 			expect(":");
-			out += "while (" + truth(c) + ") ";
-			block();
+			std::string hoisted = out.substr(mark);
+			out.erase(mark);
+			if (hoisted.empty()) {
+				out += "while (" + truth(c) + ") ";
+				block();
+			} else {
+				out += "while (true) {\n" + hoisted + "if (!" + truth(c) + ") { break; }\n";
+				block();
+				out += "}\n";
+			}
 			return;
 		}
 		if (eat("break")) {
@@ -1908,12 +1980,13 @@ class Compiler {
 		if (eat("return")) {
 			if (tk().k == TK::NL) {
 				p++;
-				out += cur->ret == Ty::Void ? "return;\n" : "return {};\n";
+				out += cur->coroutine ? "co_return Variant();\n" : cur->ret == Ty::Void ? "return;\n" : "return {};\n";
 				return;
 			}
 			E e = expr();
 			nl();
-			out += "return " + guarded(e, cur->ret, cur->ret_ref, line) + ";\n";
+			std::string value = guarded(e, cur->declared, cur->ret_ref, line);
+			out += cur->coroutine ? "co_return Variant(" + value + ");\n" : cur->ret == Ty::Var ? "return Variant(" + value + ");\n" : "return " + value + ";\n";
 			return;
 		}
 		if (eat("match")) {
@@ -2170,6 +2243,12 @@ class Compiler {
 				expect(":");
 				f.body = p;
 				skip_block();
+				f.declared = f.ret;
+				f.coroutine = awaits_between(f.body, p);
+				if (f.coroutine) {
+					f.ret = Ty::Var;
+					f.async_shape = true;
+				}
 				fns.push_back(f);
 			} else {
 				throw Err{ line, "'" + tk().s + "' is not supported at class level in a native file" };
@@ -2252,6 +2331,9 @@ class Compiler {
 			}
 		}
 		std::string body = out;
+		if (f.coroutine) {
+			return body + "co_return Variant();\n";
+		}
 		std::string fail = f.ret == Ty::Void ? "return;" : "return {};";
 		std::string tail = f.ret == Ty::Void ? "" : "return {};\n";
 		if (unsafe) {
@@ -2289,14 +2371,18 @@ public:
 		const_block = out;
 	}
 
-	void collect_virtuals(std::set<std::string> &v) const {
+	void collect_virtuals(std::set<std::string> &v) {
 		if (!parent) {
 			return;
 		}
-		for (const Fn &f : fns) {
-			const Fn *up = parent->find_fn(f.name);
+		for (Fn &f : fns) {
+			Fn *up = const_cast<Fn *>(parent->find_fn(f.name));
 			if (f.name == "_init" || !up) {
 				continue;
+			}
+			if (f.async_shape != up->async_shape) {
+				f.async_shape = up->async_shape = true;
+				f.ret = up->ret = Ty::Var;
 			}
 			bool same = up->ret == f.ret && up->params.size() == f.params.size();
 			for (size_t i = 0; same && i < f.params.size(); i++) {
@@ -2372,13 +2458,22 @@ public:
 			std::string sig = std::string(cty(f.ret)) + " C::f_" + f.name + "(";
 			std::string d = std::string("\t") + (virtuals.count(f.name) ? "virtual " : "") + cty(f.ret) + " f_" + f.name + "(";
 			int i = 0;
+			std::string names;
 			for (const Param &a : f.params) {
 				std::string one = std::string(i++ ? ", " : "") + cty(a.t) + " l_" + a.name;
 				sig += one;
 				d += one;
+				names += std::string(i > 1 ? ", " : "") + "l_" + a.name;
 			}
 			decl += d + ");\n";
-			defs += sig + ") {\n" + emit_fn(f) + "}\n\n";
+			if (f.coroutine) {
+				std::string params = sig.substr(sig.find('(') + 1);
+				decl += "\tgn::Task cf_" + f.name + "(" + params + ");\n";
+				defs += sig + ") {\n\treturn gn::run(cf_" + f.name + "(" + names + "));\n}\n\n";
+				defs += "gn::Task C::cf_" + f.name + "(" + params + ") {\n" + emit_fn(f) + "}\n\n";
+			} else {
+				defs += sig + ") {\n" + emit_fn(f) + "}\n\n";
+			}
 			emit_default_overloads(f, decl, defs);
 		}
 
@@ -2518,6 +2613,7 @@ public:
 		for (Compiler *c : order) {
 			guarded(c, [&]() {
 				c->resolve();
+				c->collect_virtuals(virtuals);
 				c->collect_virtuals(virtuals);
 			});
 		}

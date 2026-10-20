@@ -252,6 +252,86 @@ void *live_object(const Variant &v, const Loc &loc) {
 	return raw_object(v);
 }
 
+class Resume : public CallableCustom {
+	using Handle = std::coroutine_handle<Task::promise_type>;
+	mutable bool fired = false;
+	Handle handle;
+	ObjectID id;
+	Variant *slot;
+
+	static bool same(const CallableCustom *a, const CallableCustom *b) { return a == b; }
+	static bool less(const CallableCustom *a, const CallableCustom *b) { return a < b; }
+
+public:
+	Resume(Handle p_handle, Object *owner, Variant *p_slot) :
+			handle(p_handle), id(owner->get_instance_id()), slot(p_slot) {}
+	~Resume() override {
+		if (!fired) {
+			handle.destroy();
+		}
+	}
+	uint32_t hash() const override { return uint32_t(uintptr_t(this) >> 3); }
+	String get_as_text() const override { return "<await>"; }
+	CompareEqualFunc get_compare_equal_func() const override { return same; }
+	CompareLessFunc get_compare_less_func() const override { return less; }
+	ObjectID get_object() const override { return id; }
+	void call(const Variant **args, int count, Variant &, GDExtensionCallError &error) const override {
+		error.error = GDEXTENSION_CALL_OK;
+		fired = true;
+		if (!UtilityFunctions::is_instance_id_valid(id)) {
+			handle.destroy();
+			return;
+		}
+		if (count == 1) {
+			*slot = *args[0];
+		} else if (count > 1) {
+			Array list;
+			for (int i = 0; i < count; i++) {
+				list.push_back(*args[i]);
+			}
+			*slot = list;
+		}
+		handle.resume();
+		if (handle.done()) {
+			Variant value = handle.promise().result;
+			Ref<RefCounted> state = handle.promise().state;
+			handle.destroy();
+			if (state.is_valid()) {
+				state->emit_signal(GN_SN("completed"), value);
+			}
+		}
+	}
+};
+
+bool Wait::await_ready() {
+	if (value.get_type() == Variant::OBJECT && is_class(value, GN_SN("GDScriptFunctionState"))) {
+		value = get_named(value, GN_SN("completed"), Loc{ "await", "await", 0 });
+	}
+	if (value.get_type() == Variant::SIGNAL && !Signal(value).is_null()) {
+		return false;
+	}
+	result = value.get_type() == Variant::SIGNAL ? Variant() : value;
+	return true;
+}
+
+void Wait::await_suspend(std::coroutine_handle<Task::promise_type> handle) {
+	Signal(value).connect(Callable(memnew(Resume(handle, owner, &result))), Object::CONNECT_ONE_SHOT);
+}
+
+Variant run(Task task, std::shared_ptr<void> keep) {
+	auto handle = task.handle;
+	if (handle.done()) {
+		Variant value = handle.promise().result;
+		handle.destroy();
+		return value;
+	}
+	Ref<NativeCoroutine> state;
+	state.instantiate();
+	handle.promise().state = state;
+	handle.promise().keep = std::move(keep);
+	return Signal(state.ptr(), GN_SN("completed"));
+}
+
 class Lambda : public CallableCustom {
 	ObjectID id;
 	int required, total;
@@ -566,6 +646,10 @@ void NativeScript::setup(const gn::Class *p_info) {
 		props.insert(info->props[n].name, &info->props[n]);
 	}
 	take_over_path(info->path);
+}
+
+void NativeCoroutine::_bind_methods() {
+	ADD_SIGNAL(MethodInfo("completed", PropertyInfo(Variant::NIL, "value", PROPERTY_HINT_NONE, "", PROPERTY_USAGE_NIL_IS_VARIANT)));
 }
 
 static thread_local const Variant **pending_args = nullptr;

@@ -28,6 +28,7 @@ static void initialize(ModuleInitializationLevel level) {
 	if (level != MODULE_INITIALIZATION_LEVEL_SCENE) {
 		return;
 	}
+	GDREGISTER_CLASS(NativeCoroutine);
 	GDREGISTER_CLASS(NativeLanguage);
 	GDREGISTER_CLASS(NativeScript);
 	GDREGISTER_CLASS(NativeLoader);

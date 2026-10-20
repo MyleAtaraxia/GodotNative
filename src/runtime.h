@@ -62,6 +62,13 @@ public:
 	Dictionary _get_global_class_name(const String &) const override { return {}; }
 };
 
+class NativeCoroutine : public RefCounted {
+	GDCLASS(NativeCoroutine, RefCounted)
+
+protected:
+	static void _bind_methods();
+};
+
 class NativeScript : public ScriptExtension {
 	GDCLASS(NativeScript, ScriptExtension)
 

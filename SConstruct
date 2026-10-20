@@ -8,6 +8,7 @@ env = SConscript("godot-cpp/SConstruct")
 ours = env.Clone()
 ours.Append(CPPPATH=["src/"])
 ours.Append(CCFLAGS=["/EHsc"] if env.get("is_msvc") else ["-fexceptions"])
+ours.Append(CXXFLAGS=["/std:c++20"] if env.get("is_msvc") else ["-std=c++20"])
 
 sources = Glob("src/*.cpp")
 if env["target"] == "editor":
