@@ -24,7 +24,8 @@ struct Loc {
 struct Method {
 	const char *name;
 	int argc;
-	void (*call)(void *self, const Variant **args, Variant &ret);
+	int min_argc;
+	void (*call)(void *self, const Variant **args, int count, Variant &ret);
 };
 
 struct Prop {
@@ -38,13 +39,15 @@ struct Class {
 	const char *path;
 	const char *base;
 	const char *global_name;
-	void *(*create)(Object *owner);
+	void *(*create)(Object *owner, const Variant **args, int count);
 	void (*destroy)(void *self);
 	const Method *methods;
 	int method_count;
 	const Prop *props;
 	int prop_count;
 	const char *parent;
+	const char *const *signals;
+	int signal_count;
 };
 
 struct Registrar {
@@ -62,6 +65,31 @@ Variant construct(Variant::Type type, std::initializer_list<Variant> args, const
 Variant instantiate(const StringName &cls);
 Variant singleton(const StringName &name);
 Variant load(const String &path);
+Variant static_call(const StringName &cls, const StringName &method, std::initializer_list<Variant> args, const Loc &loc);
+Variant builtin_static(Variant::Type type, const StringName &method, std::initializer_list<Variant> args, const Loc &loc);
+Variant builtin_constant(Variant::Type type, const StringName &name);
+Variant check_builtin(const Variant &v, Variant::Type type, const Loc &loc);
+Variant check_class(const Variant &v, const StringName &cls, const Loc &loc);
+Variant check_script(const Variant &v, const char *path, const Loc &loc);
+bool is_builtin(const Variant &v, Variant::Type type);
+bool is_class(const Variant &v, const StringName &cls);
+bool is_script(const Variant &v, const char *path);
+Variant as_class(const Variant &v, const StringName &cls);
+Variant as_script(const Variant &v, const char *path);
+bool match_value(const Variant &value, const Variant &pattern, const Loc &loc);
+bool match_array(const Variant &value, int64_t size, bool rest);
+bool match_dict(const Variant &value, int64_t size, bool rest);
+bool has_key(const Variant &value, const Variant &key);
+Array iter_list(const Variant &v, const Loc &loc);
+int64_t len(const Variant &v, const Loc &loc);
+Array range(std::initializer_list<int64_t> args, const Loc &loc);
+String chr(int64_t code);
+int64_t ord(const String &s);
+Variant color8(int64_t r, int64_t g, int64_t b, int64_t a);
+Variant instance_from_id(int64_t id);
+bool is_instance_of(const Variant &v, const Variant &type);
+bool is_instance_valid(const Variant &v);
+bool type_exists(const StringName &name);
 
 inline int64_t add(int64_t a, int64_t b) { return int64_t(uint64_t(a) + uint64_t(b)); }
 inline int64_t sub(int64_t a, int64_t b) { return int64_t(uint64_t(a) - uint64_t(b)); }
@@ -94,13 +122,24 @@ template <typename T>
 inline T cast(const Variant &v, Variant::Type t, const Loc &loc) {
 	Variant::Type got = v.get_type();
 	bool numeric = (t == Variant::INT || t == Variant::FLOAT) && (got == Variant::INT || got == Variant::FLOAT);
-	if (got != t && !numeric) {
+	if (got != t && !numeric && !Variant::can_convert_strict(got, t)) {
 		fail("Trying to assign a value of the wrong type.", loc);
 	}
 	return v.operator T();
+}
+
+template <typename T>
+inline T builtin_constant_as(Variant::Type type, const StringName &name) {
+	return builtin_constant(type, name).operator T();
+}
+
+template <>
+inline Variant builtin_constant_as<Variant>(Variant::Type type, const StringName &name) {
+	return builtin_constant(type, name);
 }
 
 } // namespace gn
 
 #define GN_L(line) (gn::Loc{ GN_FILE, __func__, line })
 #define GN_SN(s) ([]() -> const godot::StringName & { static const godot::StringName *n = new godot::StringName(s); return *n; }())
+#define GN_BC(T, type, name) ([]() -> const T & { static const T *v = new T(gn::builtin_constant_as<T>(type, GN_SN(name))); return *v; }())

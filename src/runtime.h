@@ -96,8 +96,8 @@ public:
 	bool _is_valid() const override { return true; }
 	bool _is_abstract() const override { return false; }
 	ScriptLanguage *_get_language() const override { return NativeLanguage::singleton; }
-	bool _has_script_signal(const StringName &) const override { return false; }
-	TypedArray<Dictionary> _get_script_signal_list() const override { return {}; }
+	bool _has_script_signal(const StringName &name) const override;
+	TypedArray<Dictionary> _get_script_signal_list() const override;
 	bool _has_property_default_value(const StringName &) const override { return false; }
 	Variant _get_property_default_value(const StringName &) const override { return {}; }
 	void _update_exports() override {}

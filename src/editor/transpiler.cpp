@@ -133,6 +133,8 @@ std::vector<Tok> tokenize(const std::string &src) {
 				}
 				if (src[i] == '\\') {
 					s += src[i++];
+				} else if (src[i] == '"') {
+					s += '\\';
 				}
 				s += src[i++];
 			}
@@ -223,31 +225,54 @@ const char *vty(Ty t) {
 	}
 }
 
+struct TypeRef {
+	std::string builtin;
+	std::string cls;
+	std::string script;
+	bool same(const TypeRef &o) const { return builtin == o.builtin && cls == o.cls && script == o.script; }
+	bool any() const { return !builtin.empty() || !cls.empty() || !script.empty(); }
+};
+
 struct E {
 	std::string c;
 	Ty t = Ty::Var;
 	std::string set;
 	bool lv = false;
 	std::string local;
+	TypeRef ref;
 };
 
 struct Param {
 	std::string name;
-	Ty t;
+	Ty t = Ty::Var;
+	TypeRef ref;
+	size_t init = 0;
 };
 
 struct Fn {
 	std::string name;
 	std::vector<Param> params;
 	Ty ret = Ty::Var;
+	TypeRef ret_ref;
 	size_t body = 0;
 	int line = 0;
+	int required() const {
+		int n = 0;
+		for (const Param &a : params) {
+			n += a.init == 0;
+		}
+		return n;
+	}
 };
 
 struct Member {
 	std::string name;
 	Ty t = Ty::Var;
+	TypeRef ref;
 	bool declared = false;
+	bool onready = false;
+	bool enum_auto = false;
+	std::string enum_prev;
 	size_t init = 0;
 	int line = 0;
 };
@@ -262,6 +287,7 @@ struct Local {
 	Ty t;
 	bool weak;
 	std::string key;
+	TypeRef ref;
 };
 
 struct KnownMethod {
@@ -328,7 +354,11 @@ class Compiler {
 	Fn init_fn;
 	std::vector<Fn> fns;
 	std::vector<Member> members;
+	std::vector<std::string> signals;
+	std::set<std::string> enums;
 	std::map<std::string, Const> consts;
+	TypeRef last_ref;
+	bool next_onready = false;
 	std::set<std::string> warnings;
 
 	std::vector<std::map<std::string, Local>> scopes;
@@ -372,13 +402,59 @@ class Compiler {
 
 	Ty parse_type() {
 		std::string n = ident();
+		if (eat(".")) {
+			ident();
+			last_ref = TypeRef();
+			return Ty::Int;
+		}
 		if (eat("[")) {
 			parse_type();
+			while (eat(",")) {
+				parse_type();
+			}
 			expect("]");
 		}
+		last_ref = TypeRef();
 		static const std::map<std::string, Ty> m = { { "void", Ty::Void }, { "bool", Ty::Bool }, { "int", Ty::Int }, { "float", Ty::Float }, { "String", Ty::Str }, { "Vector2", Ty::V2 }, { "Vector3", Ty::V3 }, { "PackedFloat64Array", Ty::PF64 }, { "PackedInt64Array", Ty::PI64 }, { "Array", Ty::Arr }, { "Dictionary", Ty::Dict } };
 		auto it = m.find(n);
-		return it == m.end() ? Ty::Var : it->second;
+		if (it != m.end()) {
+			return it->second;
+		}
+		if (enums.count(n)) {
+			return Ty::Int;
+		}
+		auto b = builtin_ctors().find(n);
+		if (b != builtin_ctors().end()) {
+			last_ref.builtin = b->second;
+		} else if (n == "Signal" || n == "Callable" || n == "RID") {
+			last_ref.builtin = n == "RID" ? "RID" : n == "Signal" ? "SIGNAL" : "CALLABLE";
+		} else if (classes.class_exists(n)) {
+			last_ref.cls = n;
+		} else if (n != "Variant") {
+			last_ref.script = classes.global_class_path(n);
+		}
+		return Ty::Var;
+	}
+
+	std::string guard(const std::string &v, const TypeRef &r, const std::string &loc) const {
+		if (unsafe) {
+			return v;
+		}
+		if (!r.builtin.empty()) {
+			return "gn::check_builtin(" + v + ", Variant::" + r.builtin + ", " + loc + ")";
+		}
+		if (!r.cls.empty()) {
+			return "gn::check_class(" + v + ", GN_SN(\"" + r.cls + "\"), " + loc + ")";
+		}
+		if (!r.script.empty()) {
+			return "gn::check_script(" + v + ", \"" + r.script + "\", " + loc + ")";
+		}
+		return v;
+	}
+
+	std::string guarded(const E &e, Ty to, const TypeRef &r, int line) {
+		std::string v = conv(e, to, line);
+		return to == Ty::Var && !e.ref.same(r) ? guard(v, r, L(line)) : v;
 	}
 
 	std::string conv(const E &e, Ty to, int line) {
@@ -511,18 +587,69 @@ class Compiler {
 	}
 	E e_cmp() {
 		E a = e_bit(0);
-		while (is("<") || is(">") || is("==") || is("!=") || is("<=") || is(">=") || is("in")) {
+		for (;;) {
 			int line = ln();
-			std::string op = t[p++].s;
-			E b = e_bit(0);
-			a = bin(op, a, b, line);
+			if (eat("is")) {
+				bool negate = eat("not");
+				E r = type_test(a, line);
+				a = negate ? E{ "(!" + r.c + ")", Ty::Bool } : r;
+			} else if (is("not") && t[p + 1].s == "in") {
+				p += 2;
+				E b = e_bit(0);
+				a = { "(!" + truth(bin("in", a, b, line)) + ")", Ty::Bool };
+			} else if (is("<") || is(">") || is("==") || is("!=") || is("<=") || is(">=") || is("in")) {
+				std::string op = t[p++].s;
+				E b = e_bit(0);
+				a = bin(op, a, b, line);
+			} else {
+				return a;
+			}
+		}
+	}
+
+	E type_test(const E &a, int line) {
+		Ty ty = parse_type();
+		std::string v = conv(a, Ty::Var, line);
+		if (ty != Ty::Var) {
+			return { "gn::is_builtin(" + v + ", Variant::" + vty(ty) + ")", Ty::Bool };
+		}
+		if (!last_ref.builtin.empty()) {
+			return { "gn::is_builtin(" + v + ", Variant::" + last_ref.builtin + ")", Ty::Bool };
+		}
+		if (!last_ref.cls.empty()) {
+			return { "gn::is_class(" + v + ", GN_SN(\"" + last_ref.cls + "\"))", Ty::Bool };
+		}
+		if (!last_ref.script.empty()) {
+			return { "gn::is_script(" + v + ", \"" + last_ref.script + "\")", Ty::Bool };
+		}
+		throw Err{ line, "unknown type after 'is'" };
+	}
+
+	E e_as() {
+		E a = e_unary();
+		while (is("as")) {
+			int line = ln();
+			p++;
+			Ty ty = parse_type();
+			TypeRef ref = last_ref;
+			std::string v = conv(a, Ty::Var, line);
+			if (ty != Ty::Var) {
+				a = { conv(a, ty, line), ty };
+			} else if (!ref.builtin.empty()) {
+				a = { "gn::check_builtin(" + v + ", Variant::" + ref.builtin + ", " + L(line) + ")", Ty::Var };
+			} else if (!ref.cls.empty()) {
+				a = { "gn::as_class(" + v + ", GN_SN(\"" + ref.cls + "\"))", Ty::Var };
+			} else if (!ref.script.empty()) {
+				a = { "gn::as_script(" + v + ", \"" + ref.script + "\")", Ty::Var };
+			}
+			a.ref = ref;
 		}
 		return a;
 	}
 	E e_bit(int level) {
 		static const std::vector<std::vector<std::string>> lv = { { "|" }, { "^" }, { "&" }, { "<<", ">>" }, { "+", "-" }, { "*", "/", "%" } };
 		if (level == (int)lv.size()) {
-			return e_unary();
+			return e_as();
 		}
 		E a = e_bit(level + 1);
 		for (;;) {
@@ -623,6 +750,13 @@ class Compiler {
 		return parent ? parent->find_member(n) : nullptr;
 	}
 
+	bool find_signal(const std::string &n) const {
+		if (std::find(signals.begin(), signals.end(), n) != signals.end()) {
+			return true;
+		}
+		return parent ? parent->find_signal(n) : false;
+	}
+
 	const Compiler *owner_of(const std::string &n) const {
 		for (const Fn &f : fns) {
 			if (f.name == n) {
@@ -656,14 +790,16 @@ class Compiler {
 	}
 
 	E self_call(const Fn *f, const std::vector<E> &a, int line) {
-		if (a.size() != f->params.size()) {
+		if ((int)a.size() < f->required() || a.size() > f->params.size()) {
 			throw Err{ line, "wrong argument count calling " + f->name };
 		}
 		std::string s = "f_" + f->name + "(";
 		for (size_t i = 0; i < a.size(); i++) {
-			s += (i ? ", " : "") + conv(a[i], f->params[i].t, line);
+			s += (i ? ", " : "") + guarded(a[i], f->params[i].t, f->params[i].ref, line);
 		}
-		return { s + ")", f->ret };
+		E e{ s + ")", f->ret };
+		e.ref = f->ret_ref;
+		return e;
 	}
 
 	E native_call(const std::string &n, NativeMember m, const std::vector<E> &a, int line) {
@@ -745,7 +881,81 @@ class Compiler {
 			if (a.size() != 1) {
 				throw Err{ line, "len takes one argument" };
 			}
-			r = { "int64_t(gn::mcall(" + conv(a[0], Ty::Var, line) + ", GN_SN(\"size\"), {}, " + L(line) + "))", Ty::Int };
+			r = { "gn::len(" + conv(a[0], Ty::Var, line) + ", " + L(line) + ")", Ty::Int };
+			return true;
+		}
+		if (n == "range") {
+			p += 2;
+			std::vector<E> a = args();
+			if (a.empty() || a.size() > 3) {
+				throw Err{ line, "range takes one to three arguments" };
+			}
+			std::string list;
+			for (const E &e : a) {
+				list += (list.empty() ? "" : ", ") + conv(e, Ty::Int, line);
+			}
+			r = { "gn::range({" + list + "}, " + L(line) + ")", Ty::Arr };
+			return true;
+		}
+		if (n == "char") {
+			p += 2;
+			std::vector<E> a = args();
+			r = { "gn::chr(" + conv(a.at(0), Ty::Int, line) + ")", Ty::Str };
+			return true;
+		}
+		if (n == "ord") {
+			p += 2;
+			std::vector<E> a = args();
+			r = { "gn::ord(" + conv(a.at(0), Ty::Str, line) + ")", Ty::Int };
+			return true;
+		}
+		if (n == "Color8") {
+			p += 2;
+			std::vector<E> a = args();
+			if (a.size() < 3 || a.size() > 4) {
+				throw Err{ line, "Color8 takes three or four arguments" };
+			}
+			r = { "gn::color8(" + conv(a[0], Ty::Int, line) + ", " + conv(a[1], Ty::Int, line) + ", " + conv(a[2], Ty::Int, line) + ", " + (a.size() > 3 ? conv(a[3], Ty::Int, line) : std::string("int64_t(255)")) + ")", Ty::Var };
+			return true;
+		}
+		if (n == "type_exists") {
+			p += 2;
+			std::vector<E> a = args();
+			r = { "gn::type_exists(StringName(" + conv(a.at(0), Ty::Str, line) + "))", Ty::Bool };
+			return true;
+		}
+		if (n == "convert") {
+			p += 2;
+			std::vector<E> a = args();
+			r = { "UtilityFunctions::type_convert(" + var_args(a, line) + ")", Ty::Var };
+			return true;
+		}
+		if (n == "is_instance_of") {
+			p += 2;
+			std::vector<E> a = args();
+			r = { "gn::is_instance_of(" + conv(a.at(0), Ty::Var, line) + ", " + conv(a.at(1), Ty::Var, line) + ")", Ty::Bool };
+			return true;
+		}
+		if (n == "is_instance_valid") {
+			p += 2;
+			std::vector<E> a = args();
+			r = { "gn::is_instance_valid(" + conv(a.at(0), Ty::Var, line) + ")", Ty::Bool };
+			return true;
+		}
+		if (n == "instance_from_id") {
+			p += 2;
+			std::vector<E> a = args();
+			r = { "gn::instance_from_id(" + conv(a.at(0), Ty::Int, line) + ")", Ty::Var };
+			return true;
+		}
+		if (n == "preload") {
+			if (t[p + 2].k != TK::Str) {
+				throw Err{ line, "preload needs a constant path" };
+			}
+			std::string target = classes.absolute(path, t[p + 2].s);
+			p += 3;
+			expect(")");
+			r = { "gn::load(String(\"" + target + "\"))", Ty::Var };
 			return true;
 		}
 		if (n == "load") {
@@ -771,6 +981,22 @@ class Compiler {
 				r = { std::string(cty(u.ret)) + "(" + s + "))", u.ret };
 				return true;
 			}
+		}
+		std::string ret;
+		bool vararg = false;
+		if (n == "print_debug" || n == "typeof" || classes.utility(n, ret, vararg)) {
+			std::string fn = n == "typeof" ? "type_of" : n == "print_debug" ? "print" : n;
+			ret = n == "typeof" ? "int" : n == "print_debug" ? "void" : ret;
+			vararg = vararg || n == "print_debug";
+			p += 2;
+			std::vector<E> a = args();
+			std::string list = var_args(a, line);
+			std::string call = "UtilityFunctions::" + fn + "(" + (list.empty() && vararg ? "\"\"" : list) + ")";
+			static const std::map<std::string, Ty> rets = { { "void", Ty::Void }, { "int", Ty::Int }, { "float", Ty::Float }, { "bool", Ty::Bool }, { "String", Ty::Str } };
+			auto rt = rets.find(ret);
+			Ty ty = rt == rets.end() ? Ty::Var : rt->second;
+			r = { ty == Ty::Void ? call : (ty == Ty::Var ? "Variant(" : std::string(cty(ty)) + "(") + call + ")", ty };
+			return true;
 		}
 		auto c = ctors.find(n);
 		if (c != ctors.end()) {
@@ -839,6 +1065,58 @@ class Compiler {
 					expect("]");
 					return { s + " return " + v + "; }())", Ty::Arr };
 				}
+				if (eat("{")) {
+					std::string v = temp();
+					std::string s = "([&]() { Dictionary " + v + ";";
+					while (!is("}")) {
+						std::string key;
+						if (tk().k == TK::Id && t[p + 1].s == "=") {
+							key = "Variant(GN_SN(\"" + t[p].s + "\"))";
+							p += 2;
+						} else {
+							key = conv(expr(), Ty::Var, line);
+							expect(":");
+						}
+						s += " " + v + "[" + key + "] = " + conv(expr(), Ty::Var, line) + ";";
+						if (!eat(",")) {
+							break;
+						}
+					}
+					expect("}");
+					return { s + " return " + v + "; }())", Ty::Dict };
+				}
+				if (is("$") || is("%")) {
+					bool unique = is("%");
+					p++;
+					std::string node = unique ? "%" : "";
+					if (tk().k == TK::Str) {
+						node += t[p++].s;
+					} else {
+						while (eat(".")) {
+							node += ".";
+						}
+						if (is("/")) {
+							p++;
+							node += "/";
+						}
+						node += ident();
+						while (is("/")) {
+							p++;
+							node += "/" + ident();
+						}
+					}
+					E e{ "owner->call(GN_SN(\"get_node\"), Variant(NodePath(\"" + node + "\")))", Ty::Var };
+					e.ref.cls = "Node";
+					return e;
+				}
+				if ((is("&") || is("^")) && t[p + 1].k == TK::Str) {
+					bool name = is("&");
+					const std::string text = t[p + 1].s;
+					p += 2;
+					E e{ name ? "Variant(GN_SN(\"" + text + "\"))" : "Variant(NodePath(\"" + text + "\"))", Ty::Var };
+					e.ref.builtin = name ? "STRING_NAME" : "NODE_PATH";
+					return e;
+				}
 				break;
 			case TK::Id:
 				break;
@@ -849,7 +1127,7 @@ class Compiler {
 			throw Err{ line, "unsupported expression at '" + tok.s + "'" };
 		}
 		const std::string &n = tok.s;
-		if (n == "await" || n == "func" || n == "yield" || n == "preload") {
+		if (n == "await" || n == "func" || n == "yield") {
 			throw Err{ line, "'" + n + "' is not supported in a native file" };
 		}
 		if (n == "super") {
@@ -885,19 +1163,40 @@ class Compiler {
 			}
 			return { "Variant(owner)", Ty::Var };
 		}
-		if (n == "Vector3" && t[p + 1].s == ".") {
-			p += 2;
-			std::string m = ident();
-			if (m == "ZERO") {
-				return { "Vector3()", Ty::V3 };
+		bool dotted = t[p + 1].k == TK::Op && t[p + 1].s == "." && !find_local(n) && !find_member(n) && !find_const(n);
+		if (dotted) {
+			const std::string m = t[p + 2].s;
+			if (const Const *c = find_const(n + "." + m)) {
+				p += 3;
+				return { c->c, c->t };
 			}
-			if (m == "ONE") {
-				return { "Vector3(1, 1, 1)", Ty::V3 };
+			static const std::map<std::string, std::pair<std::string, Ty>> typed = { { "Vector2", { "VECTOR2", Ty::V2 } }, { "Vector3", { "VECTOR3", Ty::V3 } }, { "String", { "STRING", Ty::Str } }, { "Array", { "ARRAY", Ty::Arr } }, { "Dictionary", { "DICTIONARY", Ty::Dict } } };
+			std::string vt;
+			Ty ty = Ty::Var;
+			auto tp = typed.find(n);
+			auto bt = builtin_ctors().find(n);
+			if (tp != typed.end()) {
+				vt = tp->second.first;
+				ty = tp->second.second;
+			} else if (bt != builtin_ctors().end()) {
+				vt = bt->second;
 			}
-			if (m == "UP") {
-				return { "Vector3(0, 1, 0)", Ty::V3 };
+			if (!vt.empty()) {
+				if (t[p + 3].s == "(") {
+					p += 4;
+					std::vector<E> a = args();
+					return { "gn::builtin_static(Variant::" + vt + ", GN_SN(\"" + m + "\"), {" + var_args(a, line) + "}, " + L(line) + ")", Ty::Var };
+				}
+				if (!classes.has_builtin_constant(n, m)) {
+					throw Err{ line, "unknown constant " + n + "." + m };
+				}
+				p += 3;
+				E e{ std::string("GN_BC(") + cty(ty) + ", Variant::" + vt + ", \"" + m + "\")", ty };
+				if (ty == Ty::Var) {
+					e.ref.builtin = vt;
+				}
+				return e;
 			}
-			throw Err{ line, "unsupported Vector3 constant " + m };
 		}
 		if (t[p + 1].k == TK::Op && t[p + 1].s == "." && !find_local(n) && !find_member(n) && !find_const(n) && classes.class_exists(n)) {
 			const std::string m = t[p + 2].s;
@@ -908,7 +1207,15 @@ class Compiler {
 				if (!args().empty()) {
 					throw Err{ line, n + ".new() takes no arguments" };
 				}
-				return { "gn::instantiate(GN_SN(\"" + n + "\"))", Ty::Var };
+				E e{ "gn::instantiate(GN_SN(\"" + n + "\"))", Ty::Var };
+				e.ref.cls = n;
+				return e;
+			}
+			NativeMember called = classes.method(n, m);
+			if (called.found && called.is_static && t[p + 3].s == "(") {
+				p += 4;
+				std::vector<E> a = args();
+				return { "gn::static_call(GN_SN(\"" + n + "\"), GN_SN(\"" + m + "\"), {" + var_args(a, line) + "}, " + L(line) + ")", Ty::Var };
 			}
 			if (classes.int_constant(n, m, value)) {
 				p += 3;
@@ -919,6 +1226,13 @@ class Compiler {
 				return { "gn::singleton(GN_SN(\"" + n + "\"))", Ty::Var };
 			}
 			throw Err{ line, "static member " + n + "." + m + " is not supported" };
+		}
+		if (dotted) {
+			std::string target = classes.global_class_path(n);
+			if (!target.empty()) {
+				p++;
+				return { "gn::load(String(\"" + target + "\"))", Ty::Var };
+			}
 		}
 		if (t[p + 1].k == TK::Op && t[p + 1].s == "(") {
 			if (find_fn(n) == nullptr) {
@@ -949,13 +1263,19 @@ class Compiler {
 
 	E field(const std::string &n, int line) {
 		if (const Local *l = find_local(n)) {
-			return { l->c, l->t, "(" + l->c + " = %v)", true, n };
+			return { l->c, l->t, "(" + l->c + " = %v)", true, n, l->ref };
 		}
 		if (const Member *m = find_member(n)) {
-			return { "m_" + n, m->t, "(m_" + n + " = %v)", true };
+			return { "m_" + n, m->t, "(m_" + n + " = %v)", true, "", m->ref };
 		}
 		if (const Const *c = find_const(n)) {
 			return { c->c, c->t };
+		}
+		if (find_signal(n) || classes.has_signal(native(), n)) {
+			return { "Variant(Signal(owner, GN_SN(\"" + n + "\")))", Ty::Var };
+		}
+		if (find_fn(n)) {
+			return { "Variant(Callable(owner, GN_SN(\"" + n + "\")))", Ty::Var };
 		}
 		NativeMember m = classes.property(native(), n);
 		if (m.found) {
@@ -963,6 +1283,13 @@ class Compiler {
 			E e{ m.type == Ty::Var ? get : "(" + get + ").operator " + cty(m.type) + "()", m.type };
 			e.set = "owner->set(GN_SN(\"" + n + "\"), Variant(%v))";
 			return e;
+		}
+		if (classes.method(native(), n).found) {
+			return { "Variant(Callable(owner, GN_SN(\"" + n + "\")))", Ty::Var };
+		}
+		int64_t value = 0;
+		if (classes.global_constant(n, value)) {
+			return { "int64_t(" + std::to_string(value) + "LL)", Ty::Int };
 		}
 		throw Err{ line, "unknown identifier " + n };
 	}
@@ -1074,12 +1401,12 @@ class Compiler {
 				throw Retry{};
 			}
 		}
-		std::string v = l.t == Ty::Var ? conv(r, Ty::Var, line) : conv(r, l.t, line);
+		std::string v = guarded(r, l.t, l.ref, line);
 		out += subst(l.set, v) + ";\n";
 	}
 
-	void declare(const std::string &n, Ty ty, bool weak, const std::string &key) {
-		scopes.back()[n] = { "l_" + n, ty, weak, key };
+	void declare(const std::string &n, Ty ty, bool weak, const std::string &key, const TypeRef &ref = TypeRef()) {
+		scopes.back()[n] = { "l_" + n, ty, weak, key, ref };
 	}
 
 	void block() {
@@ -1102,17 +1429,19 @@ class Compiler {
 		int line = ln();
 		std::string n = ident();
 		Ty ty = Ty::Var;
+		TypeRef ref;
 		bool typed = false, infer = false;
 		if (eat(":=")) {
 			infer = true;
 		} else if (eat(":")) {
 			ty = parse_type();
+			ref = last_ref;
 			typed = true;
 			if (eat("=")) {
 				infer = false;
 			} else {
 				nl();
-				declare(n, ty, false, "");
+				declare(n, ty, false, "", ref);
 				out += std::string(cty(ty)) + " l_" + n + "{};\n";
 				return;
 			}
@@ -1129,14 +1458,15 @@ class Compiler {
 		bool weak = !typed && !infer;
 		if (infer) {
 			ty = e.t;
+			ref = e.ref;
 		} else if (weak) {
 			ty = demoted.count(key) ? Ty::Var : e.t;
 			if (ty == Ty::Var) {
 				warn(line, "could not infer a type for '" + n + "', so it stays a Variant");
 			}
 		}
-		std::string v = conv(e, ty, line);
-		declare(n, ty, weak && ty != Ty::Var, key);
+		std::string v = guarded(e, ty, ref, line);
+		declare(n, ty, weak && ty != Ty::Var, key, ref);
 		out += std::string(cty(ty)) + " l_" + n + " = " + v + ";\n";
 	}
 
@@ -1173,7 +1503,9 @@ class Compiler {
 				each = e.t == Ty::PF64 ? Ty::Float : e.t == Ty::PI64 ? Ty::Int : Ty::Var;
 				v = c + (e.t == Ty::Arr ? "[" + i + "]" : ".ptr()[" + i + "]");
 			} else {
-				throw Err{ line, "for needs a range, an int or a typed array" };
+				open = "{ Array " + c + " = gn::iter_list(" + conv(e, Ty::Var, line) + ", " + L(line) + ");\nfor (int64_t " + i + " = 0; " + i + " < " + c + ".size(); " + i + "++) {\n";
+				each = Ty::Var;
+				v = c + "[" + i + "]";
 			}
 		}
 		expect(":");
@@ -1184,6 +1516,98 @@ class Compiler {
 		block();
 		scopes.pop_back();
 		out += "} }\n";
+	}
+
+	std::string pattern(const std::string &v, int line) {
+		if (is("_") ) {
+			p++;
+			return "true";
+		}
+		if (eat("var")) {
+			std::string n = ident();
+			declare(n, Ty::Var, false, "");
+			return "(l_" + n + " = " + v + ", true)";
+		}
+		if (is("[")) {
+			p++;
+			std::string body;
+			int count = 0;
+			bool rest = false;
+			while (!is("]")) {
+				if (is(".") && t[p + 1].s == ".") {
+					p += 2;
+					rest = true;
+				} else {
+					body += " && " + pattern("gn::get_index(" + v + ", Variant(int64_t(" + std::to_string(count) + ")), " + L(line) + ")", line);
+					count++;
+				}
+				if (!eat(",")) {
+					break;
+				}
+			}
+			expect("]");
+			return "(gn::match_array(" + v + ", " + std::to_string(count) + ", " + (rest ? "true" : "false") + ")" + body + ")";
+		}
+		if (is("{")) {
+			p++;
+			std::string body;
+			int count = 0;
+			bool rest = false;
+			while (!is("}")) {
+				if (is(".") && t[p + 1].s == ".") {
+					p += 2;
+					rest = true;
+				} else {
+					std::string key = conv(expr(), Ty::Var, line);
+					count++;
+					body += " && gn::has_key(" + v + ", " + key + ")";
+					if (eat(":")) {
+						body += " && " + pattern("gn::get_index(" + v + ", " + key + ", " + L(line) + ")", line);
+					}
+				}
+				if (!eat(",")) {
+					break;
+				}
+			}
+			expect("}");
+			return "(gn::match_dict(" + v + ", " + std::to_string(count) + ", " + (rest ? "true" : "false") + ")" + body + ")";
+		}
+		return "gn::match_value(" + v + ", " + conv(e_or(), Ty::Var, line) + ", " + L(line) + ")";
+	}
+
+	void match_stmt() {
+		int line = ln();
+		E value = expr();
+		expect(":");
+		nl();
+		if (tk().k != TK::Indent) {
+			throw Err{ ln(), "expected an indented block" };
+		}
+		p++;
+		std::string v = temp(), done = temp();
+		out += "{ Variant " + v + " = " + conv(value, Ty::Var, line) + "; bool " + done + " = false;\n";
+		while (tk().k != TK::Dedent) {
+			int arm = ln();
+			scopes.emplace_back();
+			std::string test;
+			do {
+				test += (test.empty() ? "" : " || ") + pattern(v, arm);
+			} while (eat(","));
+			std::string bound;
+			for (const auto &kv : scopes.back()) {
+				bound += "Variant l_" + kv.first + ";\n";
+			}
+			if (eat("when")) {
+				test = "(" + test + ") && " + truth(expr());
+			}
+			expect(":");
+			out += "{\n" + bound + "if (!" + done + " && (" + test + ")) {\n" + done + " = true;\n";
+			block();
+			out += "}\n}\n";
+			scopes.pop_back();
+		}
+		p++;
+		out += "}\n";
 	}
 
 	void if_stmt() {
@@ -1247,13 +1671,38 @@ class Compiler {
 			}
 			E e = expr();
 			nl();
-			out += "return " + conv(e, cur->ret, line) + ";\n";
+			out += "return " + guarded(e, cur->ret, cur->ret_ref, line) + ";\n";
 			return;
 		}
-		for (const char *no : { "match", "const", "assert", "await" }) {
-			if (is(no)) {
-				throw Err{ line, std::string("'") + no + "' is not supported in a native file" };
+		if (eat("match")) {
+			match_stmt();
+			return;
+		}
+		if (eat("const")) {
+			std::string n = ident();
+			Ty ty = Ty::Void;
+			if (eat(":")) {
+				ty = parse_type();
 			}
+			if (!eat(":=")) {
+				expect("=");
+			}
+			E e = expr();
+			nl();
+			ty = ty == Ty::Void ? e.t : ty;
+			declare(n, ty, false, "");
+			out += std::string("const ") + cty(ty) + " l_" + n + " = " + conv(e, ty, line) + ";\n";
+			return;
+		}
+		if (is("assert") && t[p + 1].s == "(") {
+			p += 2;
+			std::vector<E> a = args();
+			nl();
+			if (a.empty() || a.size() > 2) {
+				throw Err{ line, "assert takes one or two arguments" };
+			}
+			out += "\n#ifdef DEBUG_ENABLED\nif (!" + truth(a[0]) + ") { gn::fail(\"Assertion failed.\", " + L(line) + "); }\n#endif\n";
+			return;
 		}
 		E l = expr();
 		static const std::set<std::string> assign_ops = { "=", "+=", "-=", "*=", "/=", "%=", "&=", "|=", "^=", "<<=", ">>=", "**=" };
@@ -1300,7 +1749,53 @@ class Compiler {
 	void top_level() {
 		while (tk().k != TK::Eof) {
 			int line = ln();
-			if (eat("extends")) {
+			if (tk().k == TK::NL) {
+				p++;
+			} else if (eat("signal")) {
+				signals.push_back(ident());
+				if (eat("(")) {
+					int depth = 1;
+					while (depth > 0) {
+						depth += is("(");
+						depth -= is(")");
+						p++;
+					}
+				}
+				nl();
+			} else if (eat("enum")) {
+				std::string name = tk().k == TK::Id ? ident() : "";
+				if (!name.empty()) {
+					enums.insert(name);
+				}
+				expect("{");
+				std::string prev;
+				while (!is("}")) {
+					Member m;
+					m.name = (name.empty() ? "" : name + ".") + ident();
+					m.line = line;
+					m.t = Ty::Int;
+					m.declared = true;
+					if (eat("=")) {
+						m.init = p;
+						int depth = 0;
+						while (depth > 0 || (!is(",") && !is("}"))) {
+							depth += is("(");
+							depth -= is(")");
+							p++;
+						}
+					} else {
+						m.enum_auto = true;
+						m.enum_prev = prev;
+					}
+					prev = m.name;
+					pending_consts.push_back(m);
+					if (!eat(",")) {
+						break;
+					}
+				}
+				expect("}");
+				nl();
+			} else if (eat("extends")) {
 				if (tk().k == TK::Str) {
 					extends_ref = classes.absolute(path, t[p++].s);
 				} else {
@@ -1333,13 +1828,25 @@ class Compiler {
 				pending_consts.push_back(m);
 			} else if (eat("@")) {
 				std::string a = ident();
-				if (a != "export") {
+				bool known = a.compare(0, 6, "export") == 0 || a == "onready" || a == "tool" || a == "icon" || a == "warning_ignore" || a == "warning_ignore_start" || a == "warning_ignore_restore" || a == "abstract";
+				if (!known) {
 					throw Err{ line, "annotation @" + a + " is not supported in a native file" };
+				}
+				next_onready = next_onready || a == "onready";
+				if (eat("(")) {
+					int depth = 1;
+					while (depth > 0) {
+						depth += is("(");
+						depth -= is(")");
+						p++;
+					}
 				}
 			} else if (eat("var")) {
 				Member m;
 				m.name = ident();
 				m.line = line;
+				m.onready = next_onready;
+				next_onready = false;
 				if (eat(":=")) {
 					m.init = p;
 					m.declared = true;
@@ -1348,6 +1855,7 @@ class Compiler {
 				} else {
 					if (eat(":")) {
 						m.t = parse_type();
+						m.ref = last_ref;
 						m.declared = true;
 					}
 					if (tk().k == TK::NL) {
@@ -1374,10 +1882,22 @@ class Compiler {
 					bool typed = false;
 					if (eat(":")) {
 						a.t = parse_type();
+						a.ref = last_ref;
 						typed = true;
 					}
 					if (is("=") || is(":=")) {
-						throw Err{ line, "default arguments are not supported yet" };
+						if (is(":=")) {
+							a.t = Ty::Void;
+							typed = true;
+						}
+						p++;
+						a.init = p;
+						int depth = 0;
+						while (depth > 0 || (!is(",") && !is(")"))) {
+							depth += is("(") || is("[") || is("{");
+							depth -= is(")") || is("]") || is("}");
+							p++;
+						}
 					}
 					if (!typed) {
 						warn(line, "parameter '" + a.name + "' has no type and stays a Variant");
@@ -1390,6 +1910,7 @@ class Compiler {
 				expect(")");
 				if (eat("->")) {
 					f.ret = parse_type();
+					f.ret_ref = last_ref;
 				} else {
 					warn(line, "function '" + f.name + "' has no return type and returns a Variant");
 				}
@@ -1409,20 +1930,40 @@ class Compiler {
 		bool checked = unsafe;
 		unsafe = true;
 		for (const Member &m : pending_consts) {
-			p = m.init;
-			E e = expr();
+			std::string id = m.name;
+			std::replace(id.begin(), id.end(), '.', '_');
+			E e;
+			if (m.enum_auto) {
+				e = { m.enum_prev.empty() ? "int64_t(0LL)" : "(" + consts[m.enum_prev].c + " + 1)", Ty::Int };
+			} else {
+				p = m.init;
+				e = expr();
+			}
 			Ty ty = m.declared ? m.t : e.t;
 			std::string value = conv(e, ty, m.line);
 			if ((ty == Ty::Int || ty == Ty::Float || ty == Ty::Bool) && value.find("()") == std::string::npos) {
-				out += std::string("\tstatic inline const ") + cty(ty) + " k_" + m.name + " = " + value + ";\n";
-				consts[m.name] = { "k_" + m.name, ty };
+				out += std::string("\tstatic inline const ") + cty(ty) + " k_" + id + " = " + value + ";\n";
+				consts[m.name] = { "k_" + id, ty };
 				continue;
 			}
-			out += std::string("\tstatic const ") + cty(ty) + " &k_" + m.name + "();\n";
-			const_defs += std::string("const ") + cty(ty) + " &C::k_" + m.name + "() {\n\tstatic const " + cty(ty) + " *v = new " + cty(ty) + "(" + value + ");\n\treturn *v;\n}\n\n";
-			consts[m.name] = { "k_" + m.name + "()", ty };
+			out += std::string("\tstatic const ") + cty(ty) + " &k_" + id + "();\n";
+			const_defs += std::string("const ") + cty(ty) + " &C::k_" + id + "() {\n\tstatic const " + cty(ty) + " *v = new " + cty(ty) + "(" + value + ");\n\treturn *v;\n}\n\n";
+			consts[m.name] = { "k_" + id + "()", ty };
 		}
 		unsafe = checked;
+		for (Fn &f : fns) {
+			scopes.assign(1, {});
+			for (Param &a : f.params) {
+				if (a.t == Ty::Void) {
+					p = a.init;
+					E e = expr();
+					a.t = e.t;
+					a.ref = e.ref;
+				}
+				declare(a.name, a.t, false, "", a.ref);
+			}
+		}
+		scopes.assign(1, {});
 		for (Member &m : members) {
 			if (m.t == Ty::Void) {
 				p = m.init;
@@ -1440,7 +1981,7 @@ class Compiler {
 				scopes.clear();
 				scopes.emplace_back();
 				for (const Param &a : f.params) {
-					declare(a.name, a.t, false, "");
+					declare(a.name, a.t, false, "", a.ref);
 				}
 				p = f.body;
 				nl();
@@ -1514,15 +2055,63 @@ public:
 		}
 	}
 
+	std::string arg_value(const Fn &f, const Param &a, int i) const {
+	 	std::string index = "a[" + std::to_string(i) + "]";
+		std::string loc = "gn::Loc{ \"" + path + "\", \"" + f.name + "\", " + std::to_string(f.line) + " }";
+		if (a.t == Ty::Var) {
+			return guard("*" + index, a.ref, loc);
+		}
+		if (unsafe) {
+			return index + "->operator " + cty(a.t) + "()";
+		}
+		return std::string("gn::cast<") + cty(a.t) + ">(*" + index + ", Variant::" + vty(a.t) + ", " + loc + ")";
+	}
+
+	std::string dispatch(const Fn &f, const std::string &target, bool keep) const {
+		std::string body;
+		int total = (int)f.params.size(), least = f.required();
+		for (int n = total; n >= least; n--) {
+			std::string call = target + "(";
+			for (int i = 0; i < n; i++) {
+				call += (i ? ", " : "") + arg_value(f, f.params[i], i);
+			}
+			call += ")";
+			std::string one = keep && f.ret != Ty::Void ? "r = Variant(" + call + ");" : call + ";" + (keep ? " r = Variant();" : "");
+			body += total == least ? one : "if (n == " + std::to_string(n) + ") { " + one + " return; } ";
+		}
+		return body;
+	}
+
+	void emit_default_overloads(const Fn &f, std::string &decl, std::string &defs) {
+		cur = &f;
+		for (size_t count = f.required(); count < f.params.size(); count++) {
+			std::string list, pass;
+			scopes.assign(1, {});
+			for (size_t i = 0; i < count; i++) {
+				const Param &a = f.params[i];
+				list += std::string(i ? ", " : "") + cty(a.t) + " l_" + a.name;
+				pass += std::string(i ? ", " : "") + "l_" + a.name;
+				declare(a.name, a.t, false, "", a.ref);
+			}
+			const Param &next = f.params[count];
+			p = next.init;
+			E value = expr();
+			pass += std::string(count ? ", " : "") + guarded(value, next.t, next.ref, f.line);
+			decl += std::string("\t") + cty(f.ret) + " f_" + f.name + "(" + list + ");\n";
+			defs += std::string(cty(f.ret)) + " C::f_" + f.name + "(" + list + ") {\n\treturn f_" + f.name + "(" + pass + ");\n}\n\n";
+		}
+		scopes.assign(1, {});
+	}
+
 	void emit(const std::set<std::string> &virtuals, std::string &header, std::string &source) {
 		const std::string id = file_id(), self = struct_name();
-		std::string decl, defs, mtab, ptab, members_init;
+		std::string decl, defs, mtab, ptab, members_init, ready_init;
 		for (const Member &m : members) {
 			decl += std::string("\t") + cty(m.t) + " m_" + m.name + "{};\n";
 			if (m.init) {
 				p = m.init;
 				E e = expr();
-				members_init += "m_" + m.name + " = " + conv(e, m.t, m.line) + ";\n";
+				(m.onready ? ready_init : members_init) += "m_" + m.name + " = " + guarded(e, m.t, m.ref, m.line) + ";\n";
 			}
 		}
 		for (const Fn &f : fns) {
@@ -1536,6 +2125,7 @@ public:
 			}
 			decl += d + ");\n";
 			defs += sig + ") {\n" + emit_fn(f) + "}\n\n";
+			emit_default_overloads(f, decl, defs);
 		}
 
 		std::vector<const Compiler *> lineage;
@@ -1543,37 +2133,53 @@ public:
 			lineage.insert(lineage.begin(), c);
 		}
 		std::map<std::string, const Fn *> table;
-		int props = 0;
+		std::vector<std::string> all_signals;
+		int props = 0, rows = 0;
+		bool has_onready = false;
+		std::string notify;
 		for (const Compiler *c : lineage) {
+			all_signals.insert(all_signals.end(), c->signals.begin(), c->signals.end());
 			for (const Fn &f : c->fns) {
-				if (f.name != "_init") {
+				if (f.name == "_notification") {
+					notify += "((C *)s)->" + c->struct_name() + "::f__notification(int64_t(*a[0])); ";
+				} else if (f.name != "_init") {
 					table[f.name] = &f;
 				}
 			}
 			for (const Member &m : c->members) {
-				std::string setv = m.t == Ty::Var ? "v" : std::string("v.operator ") + cty(m.t) + "()";
+				has_onready = has_onready || m.onready;
+				std::string loc = "gn::Loc{ \"" + c->path + "\", \"" + m.name + "\", " + std::to_string(m.line) + " }";
+				std::string setv = m.t == Ty::Var ? c->guard("v", m.ref, loc) : c->unsafe ? std::string("v.operator ") + cty(m.t) + "()" : std::string("gn::cast<") + cty(m.t) + ">(v, Variant::" + vty(m.t) + ", " + loc + ")";
 				ptab += "\t{ \"" + m.name + "\", (GDExtensionVariantType)Variant::" + vty(m.t) + ", [](void *s, Variant &r) { r = Variant(((C *)s)->m_" + m.name + "); }, [](void *s, const Variant &v) { ((C *)s)->m_" + m.name + " = " + setv + "; } },\n";
 				props++;
 			}
 		}
 		for (const auto &kv : table) {
 			const Fn &f = *kv.second;
-			std::string call = "((C *)s)->f_" + f.name + "(";
-			int i = 0;
-			for (const Param &a : f.params) {
-				call += std::string(i ? ", " : "") + (a.t == Ty::Var ? "*a[" + std::to_string(i) + "]" : "a[" + std::to_string(i) + "]->operator " + cty(a.t) + "()");
-				i++;
-			}
-			std::string body = f.ret == Ty::Void ? call + "); r = Variant();" : "r = Variant(" + call + "));";
-			mtab += "\t{ \"" + f.name + "\", " + std::to_string(i) + ", [](void *s, const Variant **a, Variant &r) { " + body + " } },\n";
+			std::string body = (has_onready && f.name == "_ready" ? "((C *)s)->ready_init(); " : "") + dispatch(f, "((C *)s)->f_" + f.name, true);
+			mtab += "\t{ \"" + f.name + "\", " + std::to_string(f.params.size()) + ", " + std::to_string(f.required()) + ", [](void *s, const Variant **a, int n, Variant &r) { " + body + " } },\n";
+			rows++;
+		}
+		if (has_onready && !table.count("_ready")) {
+			mtab += "\t{ \"_ready\", 0, 0, [](void *s, const Variant **a, int n, Variant &r) { ((C *)s)->ready_init(); r = Variant(); } },\n";
+			rows++;
+		}
+		if (!notify.empty()) {
+			mtab += "\t{ \"_notification\", 1, 1, [](void *s, const Variant **a, int n, Variant &r) { " + notify + "r = Variant(); } },\n";
+			rows++;
 		}
 
 		std::string call_init;
 		if (const Compiler *o = owner_of("_init")) {
-			if (!find_fn("_init")->params.empty()) {
-				throw Err{ find_fn("_init")->line, "_init with parameters is not supported yet" };
-			}
-			call_init = "\tc->" + o->struct_name() + "::f__init();\n";
+			const Fn &f = *find_fn("_init");
+			call_init = "\t\tif (n < " + std::to_string(f.required()) + " || n > " + std::to_string(f.params.size()) + ") {\n\t\t\tgn::fail(\"Wrong argument count calling _init.\", gn::Loc{ GN_FILE, \"_init\", " + std::to_string(f.line) + " });\n\t\t}\n";
+			call_init += "\t\t" + dispatch(f, "c->" + o->struct_name() + "::f__init", false) + "\n";
+		} else {
+			call_init = "\t\tif (n != 0) {\n\t\t\tgn::fail(\"Too many arguments for this script's new().\", gn::Loc{ GN_FILE, \"new\", 1 });\n\t\t}\n";
+		}
+		std::string signal_list;
+		for (const std::string &n : all_signals) {
+			signal_list += "\"" + n + "\", ";
 		}
 
 		header = "// Generated by GodotNative from " + path + ". Do not edit.\n#pragma once\n#include <gn_runtime.h>\n";
@@ -1583,15 +2189,17 @@ public:
 		}
 		header += "\nnamespace gn_gen {\n\nusing namespace godot;\n\nstruct " + self + (parent ? " : " + parent->struct_name() : "") + " {\n";
 		header += parent ? "" : "\tObject *owner = nullptr;\n";
-		header += const_block + decl + "\tvoid init();\n};\n\n} // namespace gn_gen\n";
+		header += const_block + decl + "\tvoid init();\n\tvoid ready_init();\n};\n\n} // namespace gn_gen\n";
 
 		source = "// Generated by GodotNative from " + path + ". Do not edit.\n#define GN_FILE \"" + path + "\"\n#include \"" + id + ".gen.h\"\n\nnamespace gn_gen {\n\nusing C = " + self + ";\n\n";
-		source += const_defs + "void C::init() {\n" + (parent ? parent->struct_name() + "::init();\n" : std::string()) + members_init + "}\n\n" + defs;
-		source += "namespace {\n\nconst gn::Method methods[] = {\n" + mtab + "\t{ nullptr, 0, nullptr },\n};\n";
-		source += "const gn::Prop props[] = {\n" + ptab + "\t{ nullptr, GDEXTENSION_VARIANT_TYPE_NIL, nullptr, nullptr },\n};\n\n";
-		source += "void *create(Object *owner) {\n\tC *c = new C();\n\tc->owner = owner;\n\tc->init();\n" + call_init + "\treturn c;\n}\n\n";
+		source += const_defs + "void C::init() {\n" + (parent ? parent->struct_name() + "::init();\n" : std::string()) + members_init + "}\n\n";
+		source += "void C::ready_init() {\n" + (parent ? parent->struct_name() + "::ready_init();\n" : std::string()) + ready_init + "}\n\n" + defs;
+		source += "namespace {\n\nconst gn::Method methods[] = {\n" + mtab + "\t{ nullptr, 0, 0, nullptr },\n};\n";
+		source += "const gn::Prop props[] = {\n" + ptab + "\t{ nullptr, GDEXTENSION_VARIANT_TYPE_NIL, nullptr, nullptr },\n};\n";
+		source += "const char *const signal_names[] = { " + signal_list + "nullptr };\n\n";
+		source += "void *create(Object *owner, const Variant **a, int n) {\n\tC *c = new C();\n\tc->owner = owner;\n\tauto run = [&]() {\n\t\tc->init();\n" + call_init + "\t};\n\ttry {\n\t\trun();\n\t} catch (const gn::Abort &) {\n\t}\n\treturn c;\n}\n\n";
 		source += "void destroy(void *self) { delete (C *)self; }\n\n";
-		source += "const gn::Class klass = { \"" + path + "\", \"" + native() + "\", \"" + global + "\", create, destroy, methods, " + std::to_string(table.size()) + ", props, " + std::to_string(props) + ", " + (parent ? "\"" + parent->path + "\"" : std::string("nullptr")) + " };\n";
+		source += "const gn::Class klass = { \"" + path + "\", \"" + native() + "\", \"" + global + "\", create, destroy, methods, " + std::to_string(rows) + ", props, " + std::to_string(props) + ", " + (parent ? "\"" + parent->path + "\"" : std::string("nullptr")) + ", signal_names, " + std::to_string(all_signals.size()) + " };\n";
 		source += "gn::Registrar reg(&klass);\n\n} // namespace\n\n} // namespace gn_gen\n";
 	}
 };

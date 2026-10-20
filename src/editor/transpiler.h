@@ -13,6 +13,7 @@ struct NativeMember {
 	bool found = false;
 	Ty type = Ty::Var;
 	bool direct = false;
+	bool is_static = false;
 	std::vector<Ty> args;
 	int defaults = 0;
 };
@@ -25,6 +26,10 @@ public:
 	virtual NativeMember property(const std::string &cls, const std::string &name) const = 0;
 	virtual bool int_constant(const std::string &cls, const std::string &name, int64_t &value) const = 0;
 	virtual bool is_singleton(const std::string &name) const = 0;
+	virtual bool utility(const std::string &name, std::string &ret, bool &vararg) const = 0;
+	virtual bool has_signal(const std::string &cls, const std::string &name) const = 0;
+	virtual bool global_constant(const std::string &name, int64_t &value) const = 0;
+	virtual bool has_builtin_constant(const std::string &type, const std::string &name) const = 0;
 };
 
 class ProjectQuery : public ClassQuery {

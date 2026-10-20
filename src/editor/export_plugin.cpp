@@ -7,10 +7,14 @@
 #include <godot_cpp/classes/editor_plugin_registration.hpp>
 #include <godot_cpp/classes/engine.hpp>
 #include <godot_cpp/classes/file_access.hpp>
+#include <godot_cpp/classes/json.hpp>
 #include <godot_cpp/classes/os.hpp>
 #include <godot_cpp/classes/project_settings.hpp>
 #include <godot_cpp/core/class_db.hpp>
 #include <godot_cpp/variant/utility_functions.hpp>
+
+#include <map>
+#include <set>
 
 using namespace godot;
 
@@ -20,6 +24,63 @@ const char *GENERATED_DIR = "res://addons/godot_native/generated";
 
 std::string std_str(const String &s) {
 	return s.utf8().get_data();
+}
+
+struct ApiData {
+	std::map<std::string, int64_t> globals;
+	std::set<std::string> builtin_constants;
+	std::map<std::string, uint32_t> hashes;
+	std::map<std::string, std::pair<std::string, bool>> utilities;
+};
+
+const ApiData &api_data() {
+	static ApiData *data = nullptr;
+	if (data) {
+		return *data;
+	}
+	data = new ApiData();
+	String root = ProjectSettings::get_singleton()->globalize_path("res://").trim_suffix("/").get_base_dir();
+	Dictionary api = JSON::parse_string(FileAccess::get_file_as_string(root.path_join("api/extension_api.json")));
+	Array constants = api.get("global_constants", Array());
+	for (int i = 0; i < constants.size(); i++) {
+		Dictionary c = constants[i];
+		data->globals[std_str(c["name"])] = int64_t(double(c["value"]));
+	}
+	Array enums = api.get("global_enums", Array());
+	for (int i = 0; i < enums.size(); i++) {
+		Dictionary e = enums[i];
+		Array values = e["values"];
+		for (int v = 0; v < values.size(); v++) {
+			Dictionary c = values[v];
+			data->globals[std_str(c["name"])] = int64_t(double(c["value"]));
+		}
+	}
+	Array utilities = api.get("utility_functions", Array());
+	for (int i = 0; i < utilities.size(); i++) {
+		Dictionary u = utilities[i];
+		data->utilities[std_str(u["name"])] = { std_str(u.get("return_type", "void")), bool(u["is_vararg"]) };
+	}
+	Array builtins = api.get("builtin_classes", Array());
+	for (int i = 0; i < builtins.size(); i++) {
+		Dictionary b = builtins[i];
+		Array list = b.get("constants", Array());
+		for (int c = 0; c < list.size(); c++) {
+			Dictionary k = list[c];
+			data->builtin_constants.insert(std_str(b["name"]) + "." + std_str(k["name"]));
+		}
+	}
+	Array classes = api.get("classes", Array());
+	for (int i = 0; i < classes.size(); i++) {
+		Dictionary c = classes[i];
+		Array methods = c.get("methods", Array());
+		for (int m = 0; m < methods.size(); m++) {
+			Dictionary d = methods[m];
+			if (d.has("hash")) {
+				data->hashes[std_str(c["name"]) + "." + std_str(d["name"])] = uint32_t(double(d["hash"]));
+			}
+		}
+	}
+	return *data;
 }
 
 gn::Ty to_ty(int64_t t, bool is_return_variant) {
@@ -56,6 +117,7 @@ public:
 			if (String(d["name"]) == String(name.c_str())) {
 				Dictionary ret = d["return"];
 				r.found = true;
+				r.is_static = int64_t(d["flags"]) & METHOD_FLAG_STATIC;
 				r.type = to_ty(ret["type"], int64_t(ret["usage"]) & PROPERTY_USAGE_NIL_IS_VARIANT);
 				r.direct = direct_ok(r.type) && !(int64_t(d["flags"]) & (METHOD_FLAG_VARARG | METHOD_FLAG_VIRTUAL | METHOD_FLAG_STATIC));
 				Array args = d["args"];
@@ -81,6 +143,29 @@ public:
 	}
 	bool is_singleton(const std::string &name) const override {
 		return Engine::get_singleton()->has_singleton(name.c_str());
+	}
+	bool utility(const std::string &name, std::string &ret, bool &vararg) const override {
+		auto it = api_data().utilities.find(name);
+		if (it == api_data().utilities.end()) {
+			return false;
+		}
+		ret = it->second.first;
+		vararg = it->second.second;
+		return true;
+	}
+	bool has_signal(const std::string &cls, const std::string &name) const override {
+		return ClassDBSingleton::get_singleton()->class_has_signal(cls.c_str(), name.c_str());
+	}
+	bool global_constant(const std::string &name, int64_t &value) const override {
+		auto it = api_data().globals.find(name);
+		if (it == api_data().globals.end()) {
+			return false;
+		}
+		value = it->second;
+		return true;
+	}
+	bool has_builtin_constant(const std::string &type, const std::string &name) const override {
+		return api_data().builtin_constants.count(type + "." + name) > 0;
 	}
 	bool read(const std::string &path, std::string &source) const override {
 		String p = path.c_str();
