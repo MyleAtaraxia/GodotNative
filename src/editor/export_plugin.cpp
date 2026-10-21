@@ -1,15 +1,23 @@
 #include "transpiler.h"
 
 #include <godot_cpp/classes/class_db_singleton.hpp>
+#include <godot_cpp/classes/control.hpp>
 #include <godot_cpp/classes/dir_access.hpp>
+#include <godot_cpp/classes/display_server.hpp>
 #include <godot_cpp/classes/editor_export_plugin.hpp>
+#include <godot_cpp/classes/editor_interface.hpp>
 #include <godot_cpp/classes/editor_plugin.hpp>
 #include <godot_cpp/classes/editor_plugin_registration.hpp>
 #include <godot_cpp/classes/engine.hpp>
 #include <godot_cpp/classes/file_access.hpp>
+#include <godot_cpp/classes/font.hpp>
 #include <godot_cpp/classes/json.hpp>
 #include <godot_cpp/classes/os.hpp>
 #include <godot_cpp/classes/project_settings.hpp>
+#include <godot_cpp/classes/rendering_server.hpp>
+#include <godot_cpp/classes/theme.hpp>
+#include <godot_cpp/classes/time.hpp>
+#include <godot_cpp/classes/window.hpp>
 #include <godot_cpp/core/class_db.hpp>
 #include <godot_cpp/variant/utility_functions.hpp>
 
@@ -313,7 +321,7 @@ String library_path(const String &target) {
 	return "res://addons/godot_native/bin/godot_native.windows." + target + ".x86_64.dll";
 }
 
-bool sync_generated(const gn::Output &r) {
+bool sync_generated(const gn::Output &r, int &sources) {
 	bool changed = false;
 	PackedStringArray ids;
 	for (const auto &file : r.files) {
@@ -325,6 +333,7 @@ bool sync_generated(const gn::Output &r) {
 			Ref<FileAccess> f = FileAccess::open(path, FileAccess::WRITE);
 			f->store_string(text);
 			changed = true;
+			sources += name.ends_with(".cpp");
 		}
 	}
 	Ref<DirAccess> gen = DirAccess::open(GENERATED_DIR);
@@ -338,7 +347,121 @@ bool sync_generated(const gn::Output &r) {
 	return changed;
 }
 
-bool compile_native(const String &target) {
+class BuildPopup {
+	Window *window = nullptr;
+	Control *canvas = nullptr;
+	Ref<Font> font;
+	int font_size = 16;
+	float scale = 1.0;
+	Color base, accent, text, muted;
+	Size2 size;
+
+public:
+	BuildPopup() {
+		EditorInterface *editor = EditorInterface::get_singleton();
+		Ref<Theme> theme = editor->get_editor_theme();
+		scale = editor->get_editor_scale();
+		font = theme->get_font("main", "EditorFonts");
+		font_size = theme->get_font_size("main_size", "EditorFonts");
+		base = theme->get_color("base_color", "Editor");
+		accent = theme->get_color("accent_color", "Editor");
+		text = theme->get_color("font_color", "Editor");
+		muted = theme->get_color("font_placeholder_color", "Editor");
+		size = Size2(460, 112) * scale;
+		window = memnew(Window);
+		window->set_title("GodotNative");
+		window->set_flag(Window::FLAG_RESIZE_DISABLED, true);
+		canvas = memnew(Control);
+		window->add_child(canvas);
+		window->popup_exclusive_centered(editor->get_base_control(), Vector2i(size));
+	}
+
+	~BuildPopup() {
+		window->hide();
+		window->queue_free();
+	}
+
+	void draw(const String &status, double ratio, int64_t seconds) {
+		RenderingServer *rs = RenderingServer::get_singleton();
+		RID item = canvas->get_canvas_item();
+		float pad = 16 * scale, line = font_size * 1.5f;
+		float width = size.x - pad * 2;
+		rs->canvas_item_clear(item);
+		rs->canvas_item_add_rect(item, Rect2(Vector2(), size), base);
+		font->draw_string(item, Vector2(pad, pad + font_size), "Compiling native scripts", HORIZONTAL_ALIGNMENT_LEFT, width, font_size, text);
+		font->draw_string(item, Vector2(pad, pad + font_size), itos(seconds) + " s", HORIZONTAL_ALIGNMENT_RIGHT, width, font_size, muted);
+		font->draw_string(item, Vector2(pad, pad + font_size + line), status, HORIZONTAL_ALIGNMENT_LEFT, width, font_size, muted);
+		Rect2 bar(pad, size.y - pad - 8 * scale, width, 8 * scale);
+		rs->canvas_item_add_rect(item, bar, Color(text, 0.15f));
+		rs->canvas_item_add_rect(item, Rect2(bar.position, Vector2(bar.size.x * ratio, bar.size.y)), accent);
+		DisplayServer::get_singleton()->process_events();
+		rs->force_draw(false);
+	}
+};
+
+String complete_lines(const Ref<FileAccess> &pipe, PackedByteArray &pending, bool flush) {
+	for (;;) {
+		PackedByteArray chunk = pipe->get_buffer(65536);
+		if (chunk.is_empty()) {
+			break;
+		}
+		pending.append_array(chunk);
+	}
+	int64_t end = flush ? pending.size() - 1 : pending.rfind('\n');
+	if (end < 0) {
+		return "";
+	}
+	String text = pending.slice(0, end + 1).get_string_from_utf8();
+	pending = pending.slice(end + 1);
+	return text;
+}
+
+int run_with_popup(const PackedStringArray &args, const String &root, const String &target, int sources, Array &output) {
+	OS::get_singleton()->set_environment("PYTHONUNBUFFERED", "1");
+	Dictionary process = OS::get_singleton()->execute_with_pipe("scons", args, false);
+	OS::get_singleton()->unset_environment("PYTHONUNBUFFERED");
+	if (process.is_empty()) {
+		return -1;
+	}
+	Ref<FileAccess> out = process["stdio"], err = process["stderr"];
+	int64_t pid = process["pid"];
+	BuildPopup popup;
+	String log, status = "Starting SCons";
+	PackedByteArray pending_out, pending_err;
+	String suffix = library_path(target).get_file().trim_prefix("godot_native").get_basename();
+	std::vector<String> objects;
+	uint64_t start = Time::get_singleton()->get_ticks_msec();
+	auto read = [&](bool flush) {
+		String text = complete_lines(out, pending_out, flush) + complete_lines(err, pending_err, flush);
+		for (const String &raw : text.split("\n", false)) {
+			String row = raw.strip_edges();
+			log += row + "\n";
+			if (row.begins_with("Compiling")) {
+				PackedStringArray words = row.replace("\\", "/").split(" ", false);
+				String source = words.size() > 1 ? String(words[words.size() - 2]) : String();
+				objects.push_back(root.path_join(source).get_basename() + suffix);
+				status = String("Compiling ") + source.get_file();
+			} else if (row.begins_with("Linking")) {
+				status = "Linking";
+			}
+		}
+	};
+	while (OS::get_singleton()->is_process_running(pid)) {
+		read(false);
+		int finished = 0;
+		for (const String &object : objects) {
+			finished += FileAccess::file_exists(object + String(".obj")) || FileAccess::file_exists(object + String(".os"));
+		}
+		double ratio = MIN(double(finished) / (MAX(sources, int(objects.size())) + 1), 0.95);
+		popup.draw(status, ratio, (Time::get_singleton()->get_ticks_msec() - start) / 1000);
+		OS::get_singleton()->delay_msec(33);
+	}
+	read(true);
+	output.push_back(log);
+	return OS::get_singleton()->get_process_exit_code(pid);
+}
+
+bool compile_native(const String &target, bool show_progress = false) {
 	DirAccess::make_dir_recursive_absolute(GENERATED_DIR);
 	Ref<FileAccess> ignore = FileAccess::open(String(GENERATED_DIR).path_join(".gdignore"), FileAccess::WRITE);
 	ignore.unref();
@@ -364,14 +487,16 @@ bool compile_native(const String &target) {
 		UtilityFunctions::print("[GodotNative] also compiled as a parent script: ", p.c_str());
 	}
 	// shortcut: only generated code is compared, so changing the addon's own runtime needs the old library deleted. Upgrade by hashing the runtime sources if that ever bites users.
-	if (!sync_generated(r) && FileAccess::file_exists(library_path(target))) {
+	int sources = 0;
+	if (!sync_generated(r, sources) && FileAccess::file_exists(library_path(target))) {
 		return true;
 	}
 	String project_dir = ProjectSettings::get_singleton()->globalize_path("res://").trim_suffix("/");
 	String root = project_dir.get_base_dir();
 	Array output;
-	// shortcut: scons blocks the editor while it compiles. Upgrade to a background build with a progress dialog when the wait becomes a complaint.
-	int code = OS::get_singleton()->execute("scons", { "-C", root, "target=" + target, "project=" + project_dir.get_file(), "-j8" }, output, true);
+	PackedStringArray args = { "-C", root, "target=" + target, "project=" + project_dir.get_file(), "-j8" };
+	bool popup = show_progress && DisplayServer::get_singleton()->get_name() != "headless";
+	int code = popup ? run_with_popup(args, root, target, sources, output) : OS::get_singleton()->execute("scons", args, output, true);
 	if (code != 0) {
 		UtilityFunctions::push_error("[GodotNative] scons failed:\n", output);
 		return false;
@@ -410,7 +535,7 @@ protected:
 	static void _bind_methods() {}
 
 public:
-	bool _build() override { return compile_native("template_debug"); }
+	bool _build() override { return compile_native("template_debug", true); }
 	void _enter_tree() override {
 		exporter.instantiate();
 		add_export_plugin(exporter);

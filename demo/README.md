@@ -16,7 +16,8 @@ Then open `demo/` in Godot and press Play.
 - Up/Down: add or remove 500 boids
 
 Pressing Play in the editor runs native too: the addon compiles toggled files
-before the game starts, and a compile error cancels the run. Debug exports work
+before the game starts, showing a progress window, and a compile error cancels
+the run. Debug exports work
 the same way. The editor itself stays interpreted, including `@tool` scripts.
 Breakpoints and live script reload don't work in native files, so remove the
 `#pragma` from a file you want to step through.
