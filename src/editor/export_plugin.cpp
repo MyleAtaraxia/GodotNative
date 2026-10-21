@@ -395,7 +395,7 @@ public:
 		rs->canvas_item_add_rect(item, bar, Color(text, 0.15f));
 		rs->canvas_item_add_rect(item, Rect2(bar.position, Vector2(bar.size.x * ratio, bar.size.y)), accent);
 		DisplayServer::get_singleton()->process_events();
-		rs->force_draw(false);
+		rs->force_draw();
 	}
 };
 
