@@ -1402,7 +1402,7 @@ class Compiler {
 		}
 		if (n == "PI" || n == "TAU") {
 			p++;
-			return { n == "PI" ? "double(Math_PI)" : "double(Math_TAU)", Ty::Float };
+			return { n == "PI" ? "3.14159265358979323846" : "6.28318530717958647692", Ty::Float };
 		}
 		if (n == "INF" || n == "NAN") {
 			p++;
