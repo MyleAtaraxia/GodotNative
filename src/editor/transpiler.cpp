@@ -140,24 +140,44 @@ std::vector<Tok> tokenize(const std::string &src) {
 			}
 			out.push_back({ flt ? TK::Float : TK::Int, n, line });
 		} else if (c == '"' || c == '\'') {
-			if (src.compare(i, 3, std::string(3, c)) == 0) {
-				throw Err{ line, "multiline strings are not supported" };
-			}
+			const std::string close(3, c);
+			bool triple = src.compare(i, 3, close) == 0;
+			int start = line;
 			std::string s;
-			i++;
-			while (i < src.size() && src[i] != c) {
-				if (src[i] == '\n') {
-					throw Err{ line, "unterminated string" };
+			i += triple ? 3 : 1;
+			for (;;) {
+				if (i >= src.size()) {
+					throw Err{ start, "unterminated string" };
 				}
-				if (src[i] == '\\') {
+				if (triple ? src.compare(i, 3, close) == 0 : src[i] == c) {
+					break;
+				}
+				if (src[i] == '\r') {
+					i++;
+				} else if (src[i] == '\n') {
+					if (!triple) {
+						throw Err{ start, "unterminated string" };
+					}
+					s += "\\n";
+					line++;
+					i++;
+				} else if (src[i] == '\\' && src.compare(i + 1, 1, "\n") == 0) {
+					line++;
+					i += 2;
+				} else if (src[i] == '\\' && src.compare(i + 1, 2, "\r\n") == 0) {
+					line++;
+					i += 3;
+				} else {
+					if (src[i] == '\\') {
+						s += src[i++];
+					} else if (src[i] == '"') {
+						s += '\\';
+					}
 					s += src[i++];
-				} else if (src[i] == '"') {
-					s += '\\';
 				}
-				s += src[i++];
 			}
-			i++;
-			out.push_back({ TK::Str, s, line });
+			i += triple ? 3 : 1;
+			out.push_back({ TK::Str, s, start });
 		} else {
 			static const char *ops[] = { "**=", "<<=", ">>=", "**", "<<", ">>", "==", "!=", "<=", ">=", "+=", "-=", "*=", "/=", "%=", "&=", "|=", "^=", ":=", "->", "&&", "||" };
 			std::string op(1, c);
