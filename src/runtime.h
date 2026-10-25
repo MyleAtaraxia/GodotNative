@@ -84,7 +84,7 @@ public:
 	void setup(const gn::Class *p_info);
 	Variant new_(const Variant **args, GDExtensionInt argc, GDExtensionCallError &error);
 
-	bool _can_instantiate() const override { return true; }
+	bool _can_instantiate() const override { return !info->is_abstract; }
 	Ref<Script> _get_base_script() const override;
 	StringName _get_global_name() const override { return info->global_name; }
 	bool _inherits_script(const Ref<Script> &s) const override;
@@ -101,7 +101,7 @@ public:
 	Dictionary _get_method_info(const StringName &) const override { return {}; }
 	bool _is_tool() const override { return false; }
 	bool _is_valid() const override { return true; }
-	bool _is_abstract() const override { return false; }
+	bool _is_abstract() const override { return info->is_abstract; }
 	ScriptLanguage *_get_language() const override { return NativeLanguage::singleton; }
 	bool _has_script_signal(const StringName &name) const override;
 	TypedArray<Dictionary> _get_script_signal_list() const override;

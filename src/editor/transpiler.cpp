@@ -297,6 +297,7 @@ struct Fn {
 	Ty declared = Ty::Var;
 	bool coroutine = false;
 	bool async_shape = false;
+	bool abstract = false;
 	int required() const {
 		int n = 0;
 		for (const Param &a : params) {
@@ -312,6 +313,7 @@ struct Member {
 	TypeRef ref;
 	bool declared = false;
 	bool onready = false;
+	int usage = 4096;
 	bool enum_auto = false;
 	std::string enum_prev;
 	size_t init = 0;
@@ -399,7 +401,9 @@ class Compiler {
 	std::set<std::string> enums;
 	std::map<std::string, Const> consts;
 	TypeRef last_ref;
-	bool next_onready = false;
+	bool next_onready = false, next_abstract = false, is_abstract = false;
+	int next_usage = 4096;
+	std::vector<std::pair<int, int>> quiet;
 	size_t lambda_end = size_t(-1);
 	int lambda_inline = 0;
 	std::set<std::string> warnings;
@@ -445,7 +449,78 @@ class Compiler {
 	}
 	std::string L(int line) const { return "GN_L(" + std::to_string(line) + ")"; }
 	std::string temp() { return "t_" + std::to_string(tmp++); }
-	void warn(int line, const std::string &m) { warnings.insert(path + ":" + std::to_string(line) + ": " + m); }
+	void warn(int line, const std::string &m) {
+		for (const std::pair<int, int> &q : quiet) {
+			if (line >= q.first && line <= q.second) {
+				return;
+			}
+		}
+		warnings.insert(path + ":" + std::to_string(line) + ": " + m);
+	}
+
+	size_t past_annotation(size_t q, bool *names_untyped = nullptr) const {
+		q += 2;
+		if (t[q].s != "(") {
+			return q;
+		}
+		int depth = 0;
+		do {
+			depth += t[q].s == "(";
+			depth -= t[q].s == ")";
+			if (names_untyped && t[q].k == TK::Str && t[q].s == "untyped_declaration") {
+				*names_untyped = true;
+			}
+			q++;
+		} while (depth > 0 && t[q].k != TK::Eof);
+		return q;
+	}
+
+	int statement_end(size_t q) const {
+		while (t[q].k == TK::NL || t[q].s == "@") {
+			q = t[q].k == TK::NL ? q + 1 : past_annotation(q);
+		}
+		int depth = 0;
+		while (t[q].k != TK::Eof && (t[q].k != TK::NL || depth > 0)) {
+			depth += t[q].s == "(" || t[q].s == "[" || t[q].s == "{";
+			depth -= t[q].s == ")" || t[q].s == "]" || t[q].s == "}";
+			q++;
+		}
+		if (t[q + 1].k == TK::Indent) {
+			q++;
+			do {
+				depth += t[q].k == TK::Indent;
+				depth -= t[q].k == TK::Dedent;
+				q++;
+			} while (depth > 0 && t[q].k != TK::Eof);
+			q--;
+		}
+		return t[q].line;
+	}
+
+	void scan_warning_ignores() {
+		int region = 0;
+		for (size_t q = 0; q + 1 < t.size(); q++) {
+			if (t[q].k != TK::Op || t[q].s != "@" || t[q + 1].s.rfind("warning_ignore", 0) != 0) {
+				continue;
+			}
+			bool named = false;
+			size_t after = past_annotation(q, &named);
+			if (!named) {
+				continue;
+			}
+			if (t[q + 1].s == "warning_ignore_start") {
+				region = region ? region : t[q].line;
+			} else if (t[q + 1].s == "warning_ignore_restore") {
+				quiet.push_back({ region, t[q].line });
+				region = 0;
+			} else {
+				quiet.push_back({ t[q].line, statement_end(after) });
+			}
+		}
+		if (region) {
+			quiet.push_back({ region, t.back().line });
+		}
+	}
 
 	static bool numeric(Ty x) { return x == Ty::Int || x == Ty::Float; }
 
@@ -1955,6 +2030,16 @@ class Compiler {
 
 	void stmt() {
 		int line = ln();
+		if (is("@")) {
+			if (t[p + 1].s.rfind("warning_ignore", 0) != 0) {
+				throw Err{ line, "annotation @" + t[p + 1].s + " is not supported on a statement" };
+			}
+			p = past_annotation(p);
+			if (tk().k == TK::NL) {
+				p++;
+			}
+			return;
+		}
 		if (eat("pass")) {
 			nl();
 			return;
@@ -2174,25 +2259,31 @@ class Compiler {
 				pending_consts.push_back(m);
 			} else if (eat("@")) {
 				std::string a = ident();
-				bool known = a.compare(0, 6, "export") == 0 || a == "onready" || a == "tool" || a == "icon" || a == "warning_ignore" || a == "warning_ignore_start" || a == "warning_ignore_restore" || a == "abstract";
+				bool exported = a.compare(0, 6, "export") == 0;
+				bool known = exported || a == "onready" || a == "tool" || a == "icon" || a == "static_unload" || a.rfind("warning_ignore", 0) == 0 || a == "abstract";
 				if (!known) {
 					throw Err{ line, "annotation @" + a + " is not supported in a native file" };
 				}
 				next_onready = next_onready || a == "onready";
-				if (eat("(")) {
-					int depth = 1;
-					while (depth > 0) {
-						depth += is("(");
-						depth -= is(")");
-						p++;
+				if (exported && a != "export_group" && a != "export_subgroup" && a != "export_category") {
+					next_usage = a == "export_storage" ? 4098 : 4102;
+				}
+				p = past_annotation(p - 2);
+				if (a == "abstract") {
+					size_t q = p;
+					while (t[q].k == TK::NL) {
+						q++;
 					}
+					(t[q].s == "func" ? next_abstract : is_abstract) = true;
 				}
 			} else if (eat("var")) {
 				Member m;
 				m.name = ident();
 				m.line = line;
 				m.onready = next_onready;
+				m.usage = next_usage;
 				next_onready = false;
+				next_usage = 4096;
 				if (eat(":=")) {
 					m.init = p;
 					m.declared = true;
@@ -2220,6 +2311,8 @@ class Compiler {
 				Fn f;
 				f.name = ident();
 				f.line = line;
+				f.abstract = next_abstract;
+				next_abstract = false;
 				expect("(");
 				while (!is(")")) {
 					Param a;
@@ -2259,6 +2352,12 @@ class Compiler {
 					f.ret_ref = last_ref;
 				} else {
 					warn(line, "function '" + f.name + "' has no return type and returns a Variant");
+				}
+				if (f.abstract) {
+					nl();
+					f.declared = f.ret;
+					fns.push_back(f);
+					continue;
 				}
 				expect(":");
 				f.body = p;
@@ -2325,6 +2424,9 @@ class Compiler {
 	}
 
 	std::string emit_fn(const Fn &f) {
+		if (f.abstract) {
+			return "gn::fail(\"Cannot call abstract function '" + f.name + "'.\", " + L(f.line) + ");\n";
+		}
 		for (;;) {
 			try {
 				cur = &f;
@@ -2370,7 +2472,10 @@ public:
 	Compiler(std::vector<Tok> toks, std::string p_path, const ProjectQuery &q, bool p_unsafe) :
 			t(std::move(toks)), path(std::move(p_path)), classes(q), unsafe(p_unsafe) {}
 
-	void scan() { top_level(); }
+	void scan() {
+		scan_warning_ignores();
+		top_level();
+	}
 	const std::string &script_path() const { return path; }
 	std::string file_id() const { return sanitize(path); }
 	const std::set<std::string> &warning_set() const { return warnings; }
@@ -2519,7 +2624,7 @@ public:
 				has_onready = has_onready || m.onready;
 				std::string loc = "gn::Loc{ \"" + c->path + "\", \"" + m.name + "\", " + std::to_string(m.line) + " }";
 				std::string setv = m.t == Ty::Var ? c->guard("v", m.ref, loc) : c->unsafe ? std::string("v.operator ") + cty(m.t) + "()" : std::string("gn::cast<") + cty(m.t) + ">(v, Variant::" + vty(m.t) + ", " + loc + ")";
-				ptab += "\t{ \"" + m.name + "\", (GDExtensionVariantType)Variant::" + vty(m.t) + ", [](void *s, Variant &r) { r = Variant(((C *)s)->m_" + m.name + "); }, [](void *s, const Variant &v) { ((C *)s)->m_" + m.name + " = " + setv + "; } },\n";
+				ptab += "\t{ \"" + m.name + "\", (GDExtensionVariantType)Variant::" + vty(m.t) + ", [](void *s, Variant &r) { r = Variant(((C *)s)->m_" + m.name + "); }, [](void *s, const Variant &v) { ((C *)s)->m_" + m.name + " = " + setv + "; }, " + std::to_string(m.usage) + " },\n";
 				props++;
 			}
 		}
@@ -2564,11 +2669,11 @@ public:
 		source += const_defs + "void C::init() {\n" + (parent ? parent->struct_name() + "::init();\n" : std::string()) + members_init + "}\n\n";
 		source += "void C::ready_init() {\n" + (parent ? parent->struct_name() + "::ready_init();\n" : std::string()) + ready_init + "}\n\n" + defs;
 		source += "namespace {\n\nconst gn::Method methods[] = {\n" + mtab + "\t{ nullptr, 0, 0, nullptr },\n};\n";
-		source += "const gn::Prop props[] = {\n" + ptab + "\t{ nullptr, GDEXTENSION_VARIANT_TYPE_NIL, nullptr, nullptr },\n};\n";
+		source += "const gn::Prop props[] = {\n" + ptab + "\t{ nullptr, GDEXTENSION_VARIANT_TYPE_NIL, nullptr, nullptr, 0 },\n};\n";
 		source += "const char *const signal_names[] = { " + signal_list + "nullptr };\n\n";
 		source += "void *create(Object *owner, const Variant **a, int n) {\n\tC *c = new C();\n\tc->owner = owner;\n\tauto run = [&]() {\n\t\tc->init();\n" + call_init + "\t};\n\ttry {\n\t\trun();\n\t} catch (const gn::Abort &) {\n\t}\n\treturn c;\n}\n\n";
 		source += "void destroy(void *self) { delete (C *)self; }\n\n";
-		source += "const gn::Class klass = { \"" + path + "\", \"" + native() + "\", \"" + global + "\", create, destroy, methods, " + std::to_string(rows) + ", props, " + std::to_string(props) + ", " + (parent ? "\"" + parent->path + "\"" : std::string("nullptr")) + ", signal_names, " + std::to_string(all_signals.size()) + " };\n";
+		source += "const gn::Class klass = { \"" + path + "\", \"" + native() + "\", \"" + global + "\", create, destroy, methods, " + std::to_string(rows) + ", props, " + std::to_string(props) + ", " + (parent ? "\"" + parent->path + "\"" : std::string("nullptr")) + ", signal_names, " + std::to_string(all_signals.size()) + ", " + (is_abstract ? "true" : "false") + " };\n";
 		source += "gn::Registrar reg(&klass);\n\n} // namespace\n\n} // namespace gn_gen\n";
 	}
 };

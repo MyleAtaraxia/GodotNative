@@ -40,6 +40,7 @@ struct Prop {
 	GDExtensionVariantType type;
 	void (*get)(void *self, Variant &ret);
 	void (*set)(void *self, const Variant &value);
+	uint32_t usage;
 };
 
 struct Class {
@@ -55,6 +56,7 @@ struct Class {
 	const char *parent;
 	const char *const *signals;
 	int signal_count;
+	bool is_abstract;
 };
 
 struct Registrar {

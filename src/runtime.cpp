@@ -69,7 +69,7 @@ const GDExtensionPropertyInfo *i_props(void *self, uint32_t *count) {
 		out[n].class_name = memnew(StringName);
 		out[n].hint = 0;
 		out[n].hint_string = memnew(String);
-		out[n].usage = PROPERTY_USAGE_SCRIPT_VARIABLE | PROPERTY_USAGE_STORAGE | PROPERTY_USAGE_EDITOR;
+		out[n].usage = c->props[n].usage;
 	}
 	*count = c->prop_count;
 	return out;
@@ -656,6 +656,7 @@ static thread_local const Variant **pending_args = nullptr;
 static thread_local int pending_count = 0;
 
 Variant NativeScript::new_(const Variant **args, GDExtensionInt argc, GDExtensionCallError &) {
+	ERR_FAIL_COND_V_MSG(info->is_abstract, Variant(), "Cannot construct abstract class.");
 	pending_args = args;
 	pending_count = int(argc);
 	Variant instance = ClassDBSingleton::get_singleton()->instantiate(info->base);
@@ -731,7 +732,7 @@ TypedArray<Dictionary> NativeScript::_get_script_property_list() const {
 		Dictionary d;
 		d["name"] = info->props[n].name;
 		d["type"] = (int)info->props[n].type;
-		d["usage"] = (int)(PROPERTY_USAGE_SCRIPT_VARIABLE | PROPERTY_USAGE_STORAGE | PROPERTY_USAGE_EDITOR);
+		d["usage"] = (int)info->props[n].usage;
 		r.push_back(d);
 	}
 	return r;
