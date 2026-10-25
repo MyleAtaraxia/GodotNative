@@ -3,6 +3,7 @@
 #include <godot_cpp/classes/class_db_singleton.hpp>
 #include <godot_cpp/classes/engine.hpp>
 #include <godot_cpp/classes/resource_loader.hpp>
+#include <godot_cpp/classes/script.hpp>
 #include <godot_cpp/core/class_db.hpp>
 #include <godot_cpp/core/error_macros.hpp>
 
@@ -447,6 +448,34 @@ Variant check_script(const Variant &v, const char *path, const Loc &loc) {
 		fail("Trying to assign a value of the wrong class.", loc);
 	}
 	return v;
+}
+
+Array typed_array(const Array &source, Variant::Type type, const StringName &cls, const char *script, const Loc &loc) {
+	Array r;
+	if (script) {
+		Variant s = load(script);
+		r.set_typed(type, Object::cast_to<Script>(s.operator Object *())->get_instance_base_type(), s);
+	} else {
+		r.set_typed(type, cls, Variant());
+	}
+	r.assign(source);
+	if (r.size() != source.size()) {
+		fail("Trying to assign an array with elements of the wrong type.", loc);
+	}
+	return r;
+}
+
+Array check_array(const Array &value, Variant::Type type, const StringName &cls, const char *script, const Loc &loc) {
+	bool same = int64_t(value.get_typed_builtin()) == int64_t(type);
+	if (same && script) {
+		same = value.get_typed_script() == load(script);
+	} else if (same) {
+		same = value.get_typed_class_name() == cls && !value.get_typed_script().booleanize();
+	}
+	if (!same) {
+		fail("Trying to assign an array of the wrong type.", loc);
+	}
+	return value;
 }
 
 Variant as_class(const Variant &v, const StringName &cls) {

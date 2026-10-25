@@ -83,6 +83,8 @@ Variant builtin_constant(Variant::Type type, const StringName &name);
 Variant check_builtin(const Variant &v, Variant::Type type, const Loc &loc);
 Variant check_class(const Variant &v, const StringName &cls, const Loc &loc);
 Variant check_script(const Variant &v, const char *path, const Loc &loc);
+Array typed_array(const Array &source, Variant::Type type, const StringName &cls, const char *script, const Loc &loc);
+Array check_array(const Array &value, Variant::Type type, const StringName &cls, const char *script, const Loc &loc);
 bool is_builtin(const Variant &v, Variant::Type type);
 bool is_class(const Variant &v, const StringName &cls);
 bool is_script(const Variant &v, const char *path);

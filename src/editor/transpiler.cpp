@@ -267,7 +267,9 @@ struct TypeRef {
 	std::string builtin;
 	std::string cls;
 	std::string script;
-	bool same(const TypeRef &o) const { return builtin == o.builtin && cls == o.cls && script == o.script; }
+	std::string elem;
+	Ty elem_t = Ty::Var;
+	bool same(const TypeRef &o) const { return builtin == o.builtin && cls == o.cls && script == o.script && elem == o.elem; }
 	bool any() const { return !builtin.empty() || !cls.empty() || !script.empty(); }
 };
 
@@ -278,6 +280,9 @@ struct E {
 	bool lv = false;
 	std::string local;
 	TypeRef ref;
+	bool literal = false;
+	std::string raw;
+	Ty elem_t = Ty::Var;
 };
 
 struct Param {
@@ -531,14 +536,21 @@ class Compiler {
 			last_ref = TypeRef();
 			return Ty::Int;
 		}
+		std::string elem;
+		Ty elem_t = Ty::Var;
 		if (eat("[")) {
-			parse_type();
+			elem_t = parse_type();
+			elem = element_args(elem_t, last_ref);
 			while (eat(",")) {
 				parse_type();
 			}
 			expect("]");
 		}
 		last_ref = TypeRef();
+		if (n == "Array") {
+			last_ref.elem = elem;
+			last_ref.elem_t = elem_t;
+		}
 		static const std::map<std::string, Ty> m = { { "void", Ty::Void }, { "bool", Ty::Bool }, { "int", Ty::Int }, { "float", Ty::Float }, { "String", Ty::Str }, { "Vector2", Ty::V2 }, { "Vector3", Ty::V3 }, { "PackedFloat64Array", Ty::PF64 }, { "PackedInt64Array", Ty::PI64 }, { "Array", Ty::Arr }, { "Dictionary", Ty::Dict } };
 		auto it = m.find(n);
 		if (it != m.end()) {
@@ -560,7 +572,23 @@ class Compiler {
 		return Ty::Var;
 	}
 
+	static std::string element_args(Ty ty, const TypeRef &r) {
+		if (ty != Ty::Var) {
+			return std::string("Variant::") + vty(ty) + ", StringName(), nullptr";
+		}
+		if (!r.builtin.empty()) {
+			return "Variant::" + r.builtin + ", StringName(), nullptr";
+		}
+		if (!r.cls.empty()) {
+			return "Variant::OBJECT, GN_SN(\"" + r.cls + "\"), nullptr";
+		}
+		return r.script.empty() ? "" : "Variant::OBJECT, StringName(), \"" + r.script + "\"";
+	}
+
 	std::string guard(const std::string &v, const TypeRef &r, const std::string &loc) const {
+		if (!r.elem.empty()) {
+			return unsafe ? v : "gn::check_array(" + v + ", " + r.elem + ", " + loc + ")";
+		}
 		if (!r.builtin.empty()) {
 			return "gn::check_builtin(" + v + ", Variant::" + r.builtin + ", " + loc + ")";
 		}
@@ -578,7 +606,10 @@ class Compiler {
 
 	std::string guarded(const E &e, Ty to, const TypeRef &r, int line) {
 		std::string v = conv(e, to, line);
-		return to == Ty::Var && !e.ref.same(r) ? guard(v, r, L(line)) : v;
+		if (e.literal && !r.elem.empty()) {
+			return "gn::typed_array(" + v + ", " + r.elem + ", " + L(line) + ")";
+		}
+		return (to == Ty::Var || to == Ty::Arr) && !e.ref.same(r) ? guard(v, r, L(line)) : v;
 	}
 
 	std::string conv(const E &e, Ty to, int line) {
@@ -1068,7 +1099,7 @@ class Compiler {
 				ref = last_ref;
 			}
 			std::string at = "*args[" + std::to_string(index) + "]";
-			std::string value = ty == Ty::Var ? guard(at, ref, L(line)) : unsafe ? "(" + at + ").operator " + cty(ty) + "()" : std::string("gn::cast<") + cty(ty) + ">(" + at + ", Variant::" + vty(ty) + ", " + L(line) + ")";
+			std::string value = guard(ty == Ty::Var ? at : unsafe ? "(" + at + ").operator " + cty(ty) + "()" : std::string("gn::cast<") + cty(ty) + ">(" + at + ", Variant::" + vty(ty) + ", " + L(line) + ")", ref, L(line));
 			if (eat("=")) {
 				value = "argc > " + std::to_string(index) + " ? " + value + " : " + conv(expr(), ty, line);
 			} else {
@@ -1398,7 +1429,9 @@ class Compiler {
 						}
 					}
 					expect("]");
-					return { s + " return " + v + "; }())", Ty::Arr };
+					E list{ s + " return " + v + "; }())", Ty::Arr };
+					list.literal = true;
+					return list;
 				}
 				if (eat("{")) {
 					std::string v = temp();
@@ -1758,7 +1791,14 @@ class Compiler {
 			if (packed) {
 				return { b.c + ".ptr()[" + idx + "]", b.t == Ty::PF64 ? Ty::Float : Ty::Int, "(" + b.c + ".ptrw()[" + idx + "] = %v)" };
 			}
-			return { b.c + "[" + idx + "]", Ty::Var, "(" + b.c + "[" + idx + "] = %v)" };
+			E item{ b.c + "[" + idx + "]", Ty::Var, "(" + b.c + "[" + idx + "] = %v)" };
+			item.raw = item.set;
+			item.elem_t = b.ref.elem_t;
+			if (!b.ref.elem.empty() && !unsafe) {
+				std::string s = temp();
+				item.set = "[&]() { Variant " + s + " = " + b.c + "; gn::set_index(" + s + ", Variant(" + idx + "), %v, " + L(line) + "); }()";
+			}
+			return item;
 		}
 		std::string v = conv(i, Ty::Var, line), sets;
 		if (b.t == Ty::Var && b.lv) {
@@ -1791,8 +1831,11 @@ class Compiler {
 				throw Retry{};
 			}
 		}
+		if (numeric(l.elem_t) && numeric(r.t)) {
+			r = { conv(r, l.elem_t, line), l.elem_t };
+		}
 		std::string v = guarded(r, l.t, l.ref, line);
-		out += subst(l.set, v) + ";\n";
+		out += subst(l.elem_t != Ty::Var && r.t == l.elem_t ? l.raw : l.set, v) + ";\n";
 	}
 
 	void declare(const std::string &n, Ty ty, bool weak, const std::string &key, const TypeRef &ref = TypeRef()) {
@@ -1832,7 +1875,7 @@ class Compiler {
 			} else {
 				nl();
 				declare(n, ty, false, "", ref);
-				out += std::string(cty(ty)) + " l_" + n + "{};\n";
+				out += ref.elem.empty() ? std::string(cty(ty)) + " l_" + n + "{};\n" : "Array l_" + n + " = gn::typed_array(Array(), " + ref.elem + ", " + L(line) + ");\n";
 				return;
 			}
 		} else if (!eat("=")) {
@@ -2418,7 +2461,9 @@ class Compiler {
 		for (Member &m : members) {
 			if (m.t == Ty::Void) {
 				p = m.init;
-				m.t = expr().t;
+				E e = expr();
+				m.t = e.t;
+				m.ref = e.ref;
 			}
 		}
 	}
@@ -2529,7 +2574,7 @@ public:
 		if (unsafe) {
 			return index + "->operator " + cty(a.t) + "()";
 		}
-		return std::string("gn::cast<") + cty(a.t) + ">(*" + index + ", Variant::" + vty(a.t) + ", " + loc + ")";
+		return guard(std::string("gn::cast<") + cty(a.t) + ">(*" + index + ", Variant::" + vty(a.t) + ", " + loc + ")", a.ref, loc);
 	}
 
 	std::string dispatch(const Fn &f, const std::string &target, bool keep) const {
@@ -2577,6 +2622,8 @@ public:
 				p = m.init;
 				E e = expr();
 				(m.onready ? ready_init : members_init) += "m_" + m.name + " = " + guarded(e, m.t, m.ref, m.line) + ";\n";
+			} else if (!m.ref.elem.empty()) {
+				members_init += "m_" + m.name + " = gn::typed_array(Array(), " + m.ref.elem + ", " + L(m.line) + ");\n";
 			}
 		}
 		for (const Fn &f : fns) {
@@ -2623,7 +2670,7 @@ public:
 			for (const Member &m : c->members) {
 				has_onready = has_onready || m.onready;
 				std::string loc = "gn::Loc{ \"" + c->path + "\", \"" + m.name + "\", " + std::to_string(m.line) + " }";
-				std::string setv = m.t == Ty::Var ? c->guard("v", m.ref, loc) : c->unsafe ? std::string("v.operator ") + cty(m.t) + "()" : std::string("gn::cast<") + cty(m.t) + ">(v, Variant::" + vty(m.t) + ", " + loc + ")";
+				std::string setv = c->guard(m.t == Ty::Var ? "v" : c->unsafe ? std::string("v.operator ") + cty(m.t) + "()" : std::string("gn::cast<") + cty(m.t) + ">(v, Variant::" + vty(m.t) + ", " + loc + ")", m.ref, loc);
 				ptab += "\t{ \"" + m.name + "\", (GDExtensionVariantType)Variant::" + vty(m.t) + ", [](void *s, Variant &r) { r = Variant(((C *)s)->m_" + m.name + "); }, [](void *s, const Variant &v) { ((C *)s)->m_" + m.name + " = " + setv + "; }, " + std::to_string(m.usage) + " },\n";
 				props++;
 			}
