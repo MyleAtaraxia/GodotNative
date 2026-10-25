@@ -17,7 +17,10 @@ Then open `demo/` in Godot and press Play.
 
 Pressing Play in the editor runs native too: the addon compiles toggled files
 before the game starts, showing a progress window, and a compile error cancels
-the run. Debug exports work
+the run. `game/` holds 48 sample `#pragma native` scripts that the demo never
+runs, so a full rebuild takes long enough to show the window. Only changed
+scripts recompile; delete `addons/godot_native/generated/` to rebuild them all.
+Debug exports work
 the same way. The editor itself stays interpreted, including `@tool` scripts.
 Breakpoints and live script reload don't work in native files, so remove the
 `#pragma` from a file you want to step through.
