@@ -33,6 +33,7 @@ struct Method {
 	int argc;
 	int min_argc;
 	void (*call)(void *self, const Variant **args, int count, Variant &ret);
+	bool is_static;
 };
 
 struct Prop {
@@ -57,6 +58,11 @@ struct Class {
 	const char *const *signals;
 	int signal_count;
 	bool is_abstract;
+	const Prop *statics;
+	int static_count;
+	void (*static_init)();
+	void (*static_clear)();
+	void (*constants)(Dictionary &out);
 };
 
 struct Registrar {
@@ -74,6 +80,7 @@ Variant construct(Variant::Type type, std::initializer_list<Variant> args, const
 Variant instantiate(const StringName &cls);
 Variant singleton(const StringName &name);
 Variant load(const String &path);
+Object *script_object(const char *path);
 Variant static_call(GDExtensionMethodBindPtr mb, std::initializer_list<Variant> args, const Loc &loc);
 GDExtensionMethodBindPtr method_bind(const char *cls, const char *name, int64_t hash);
 void *raw_object(const Variant &v);

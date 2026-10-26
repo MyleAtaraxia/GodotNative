@@ -80,8 +80,16 @@ public:
 	mutable Ref<Script> base_script;
 	HashMap<StringName, const gn::Method *> methods;
 	HashMap<StringName, const gn::Prop *> props;
+	HashMap<StringName, const gn::Prop *> statics;
+	mutable Dictionary constants;
+	mutable bool constants_ready = false;
 
+	static Ref<NativeScript> of(const gn::Class *c);
+	static void release_all();
 	void setup(const gn::Class *p_info);
+	bool read_static(const StringName &name, Variant &ret) const;
+	bool write_static(const StringName &name, const Variant &value) const;
+	const Dictionary &constant_map() const;
 	Variant new_(const Variant **args, GDExtensionInt argc, GDExtensionCallError &error);
 
 	bool _can_instantiate() const override { return !info->is_abstract; }
@@ -97,7 +105,7 @@ public:
 	void _set_source_code(const String &) override {}
 	Error _reload(bool) override { return OK; }
 	bool _has_method(const StringName &m) const override { return methods.has(m); }
-	bool _has_static_method(const StringName &) const override { return false; }
+	bool _has_static_method(const StringName &m) const override;
 	Dictionary _get_method_info(const StringName &) const override { return {}; }
 	bool _is_tool() const override { return false; }
 	bool _is_valid() const override { return true; }
@@ -111,7 +119,7 @@ public:
 	TypedArray<Dictionary> _get_script_method_list() const override;
 	TypedArray<Dictionary> _get_script_property_list() const override;
 	int32_t _get_member_line(const StringName &) const override { return -1; }
-	Dictionary _get_constants() const override { return {}; }
+	Dictionary _get_constants() const override { return constant_map(); }
 	TypedArray<StringName> _get_members() const override;
 	bool _is_placeholder_fallback_enabled() const override { return false; }
 	Variant _get_rpc_config() const override { return {}; }

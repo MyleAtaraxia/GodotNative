@@ -42,7 +42,7 @@ GDExtensionBool i_set(void *self, const void *name, const void *value) {
 	Instance *i = (Instance *)self;
 	auto it = i->script->props.find(*(const StringName *)name);
 	if (it == i->script->props.end()) {
-		return false;
+		return i->script->write_static(*(const StringName *)name, *(const Variant *)value);
 	}
 	try {
 		it->value->set(i->data, *(const Variant *)value);
@@ -55,7 +55,7 @@ GDExtensionBool i_get(void *self, const void *name, void *ret) {
 	Instance *i = (Instance *)self;
 	auto it = i->script->props.find(*(const StringName *)name);
 	if (it == i->script->props.end()) {
-		return false;
+		return i->script->read_static(*(const StringName *)name, *(Variant *)ret);
 	}
 	it->value->get(i->data, *(Variant *)ret);
 	return true;
@@ -156,6 +156,64 @@ GDExtensionScriptInstanceInfo3 make_info() {
 }
 
 const GDExtensionScriptInstanceInfo3 instance_info = make_info();
+
+GDExtensionBool script_set(void *self, const void *name, const void *value) {
+	return ((NativeScript *)self)->write_static(*(const StringName *)name, *(const Variant *)value);
+}
+
+GDExtensionBool script_get(void *self, const void *name, void *ret) {
+	return ((NativeScript *)self)->read_static(*(const StringName *)name, *(Variant *)ret);
+}
+
+GDExtensionBool script_has_method(void *self, const void *name) {
+	return ((NativeScript *)self)->_has_static_method(*(const StringName *)name);
+}
+
+void script_call(void *self, const void *method, const void *const *args, GDExtensionInt argc, void *ret, GDExtensionCallError *error) {
+	NativeScript *script = (NativeScript *)self;
+	auto it = script->methods.find(*(const StringName *)method);
+	if (it == script->methods.end() || !it->value->is_static) {
+		error->error = GDEXTENSION_CALL_ERROR_INVALID_METHOD;
+		return;
+	}
+	const gn::Method *m = it->value;
+	if (argc < m->min_argc || argc > m->argc) {
+		error->error = argc < m->min_argc ? GDEXTENSION_CALL_ERROR_TOO_FEW_ARGUMENTS : GDEXTENSION_CALL_ERROR_TOO_MANY_ARGUMENTS;
+		error->expected = argc < m->min_argc ? m->min_argc : m->argc;
+		return;
+	}
+	error->error = GDEXTENSION_CALL_OK;
+	try {
+		m->call(nullptr, (const Variant **)args, int(argc), *(Variant *)ret);
+	} catch (const gn::Abort &) {
+	}
+}
+
+void *script_owner(void *self) { return ((NativeScript *)self)->_owner; }
+void script_free(void *) {}
+
+GDExtensionScriptInstanceInfo3 make_script_side() {
+	GDExtensionScriptInstanceInfo3 s = {};
+	s.set_func = script_set;
+	s.get_func = script_get;
+	s.has_method_func = script_has_method;
+	s.call_func = script_call;
+	s.refcount_incremented_func = i_refcount_inc;
+	s.refcount_decremented_func = i_refcount_dec;
+	s.get_owner_func = script_owner;
+	s.get_script_func = script_owner;
+	s.is_placeholder_func = i_placeholder;
+	s.get_language_func = i_language;
+	s.free_func = script_free;
+	return s;
+}
+
+const GDExtensionScriptInstanceInfo3 script_side_info = make_script_side();
+
+HashMap<String, Ref<NativeScript>> &live_scripts() {
+	static HashMap<String, Ref<NativeScript>> m;
+	return m;
+}
 
 } // namespace
 
@@ -652,6 +710,10 @@ Variant load(const String &path) {
 	return ResourceLoader::get_singleton()->call(GN_SN("load"), path);
 }
 
+Object *script_object(const char *path) {
+	return NativeScript::of(find_class(path)).ptr();
+}
+
 void set_index(Variant &base, const Variant &index, const Variant &value, const Loc &loc) {
 	bool valid = false;
 	base.set(index, value, &valid);
@@ -674,7 +736,74 @@ void NativeScript::setup(const gn::Class *p_info) {
 	for (int n = 0; n < info->prop_count; n++) {
 		props.insert(info->props[n].name, &info->props[n]);
 	}
+	for (int n = 0; n < info->static_count; n++) {
+		statics.insert(info->statics[n].name, &info->statics[n]);
+	}
 	take_over_path(info->path);
+	// shortcut: scripts answer MyScript.foo() through this hook, which needs Godot 4.5. On 4.4 only instances reach statics. Upgrade if 4.4 users need it.
+	if (gdextension_interface::object_set_script_instance) {
+		gdextension_interface::object_set_script_instance(_owner, gdextension_interface::script_instance_create3(&script_side_info, this));
+	}
+	try {
+		info->static_init();
+	} catch (const gn::Abort &) {
+	}
+}
+
+Ref<NativeScript> NativeScript::of(const gn::Class *c) {
+	String path = c->path;
+	if (!live_scripts().has(path)) {
+		Ref<NativeScript> s;
+		s.instantiate();
+		live_scripts().insert(path, s);
+		s->setup(c);
+	}
+	return live_scripts()[path];
+}
+
+void NativeScript::release_all() {
+	for (const gn::Class *c : registry()) {
+		c->static_clear();
+	}
+	live_scripts().clear();
+}
+
+bool NativeScript::read_static(const StringName &name, Variant &ret) const {
+	auto it = statics.find(name);
+	if (it != statics.end()) {
+		it->value->get(nullptr, ret);
+		return true;
+	}
+	if (!constant_map().has(name)) {
+		return false;
+	}
+	ret = constant_map()[name];
+	return true;
+}
+
+bool NativeScript::write_static(const StringName &name, const Variant &value) const {
+	auto it = statics.find(name);
+	if (it == statics.end()) {
+		return false;
+	}
+	try {
+		it->value->set(nullptr, value);
+	} catch (const gn::Abort &) {
+	}
+	return true;
+}
+
+const Dictionary &NativeScript::constant_map() const {
+	if (!constants_ready) {
+		constants_ready = true;
+		info->constants(constants);
+	}
+	return constants;
+}
+
+bool NativeScript::_has_static_method(const StringName &m) const {
+	auto it = methods.find(m);
+	return it != methods.end() && it->value->is_static;
 }
 
 void NativeCoroutine::_bind_methods() {
@@ -792,8 +921,5 @@ Variant NativeLoader::_load(const String &path, const String &original, bool, in
 	if (!c) {
 		return Variant();
 	}
-	Ref<NativeScript> s;
-	s.instantiate();
-	s->setup(c);
-	return s;
+	return NativeScript::of(c);
 }

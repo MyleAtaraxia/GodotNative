@@ -44,6 +44,7 @@ static void uninitialize(ModuleInitializationLevel level) {
 	if (level != MODULE_INITIALIZATION_LEVEL_SCENE) {
 		return;
 	}
+	NativeScript::release_all();
 	ResourceLoader::get_singleton()->remove_resource_format_loader(loader);
 	loader.unref();
 	Engine::get_singleton()->unregister_script_language(NativeLanguage::singleton);

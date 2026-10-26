@@ -303,6 +303,7 @@ struct Fn {
 	bool coroutine = false;
 	bool async_shape = false;
 	bool abstract = false;
+	bool is_static = false;
 	int required() const {
 		int n = 0;
 		for (const Param &a : params) {
@@ -318,6 +319,7 @@ struct Member {
 	TypeRef ref;
 	bool declared = false;
 	bool onready = false;
+	bool is_static = false;
 	int usage = 4096;
 	bool enum_auto = false;
 	std::string enum_prev;
@@ -399,7 +401,7 @@ class Compiler {
 	bool resolved = false;
 
 	std::string base = "RefCounted", global, const_block, const_defs;
-	Fn init_fn;
+	Fn init_fn, static_fn;
 	std::vector<Fn> fns;
 	std::vector<Member> members;
 	std::vector<std::string> signals;
@@ -905,6 +907,15 @@ class Compiler {
 		return parent ? parent->find_member(n) : nullptr;
 	}
 
+	const Compiler *member_owner(const std::string &n) const {
+		for (const Member &m : members) {
+			if (m.name == n) {
+				return this;
+			}
+		}
+		return parent ? parent->member_owner(n) : nullptr;
+	}
+
 	bool find_signal(const std::string &n) const {
 		if (std::find(signals.begin(), signals.end(), n) != signals.end()) {
 			return true;
@@ -947,6 +958,9 @@ class Compiler {
 	E self_call(const Fn *f, const std::vector<E> &a, int line) {
 		if ((int)a.size() < f->required() || a.size() > f->params.size()) {
 			throw Err{ line, "wrong argument count calling " + f->name };
+		}
+		if (cur->is_static && !f->is_static) {
+			throw Err{ line, "cannot call instance function " + f->name + " from a static function" };
 		}
 		std::string s = "f_" + f->name + "(";
 		for (size_t i = 0; i < a.size(); i++) {
@@ -1537,6 +1551,9 @@ class Compiler {
 			return { n == "INF" ? "double(INFINITY)" : "double(NAN)", Ty::Float };
 		}
 		if (n == "self") {
+			if (cur->is_static) {
+				throw Err{ line, "cannot use self in a static function" };
+			}
 			p++;
 			if (is(".")) {
 				p++;
@@ -1646,6 +1663,9 @@ class Compiler {
 		if (!m.found) {
 			throw Err{ line, "unknown function " + n };
 		}
+		if (cur->is_static) {
+			throw Err{ line, "cannot call instance method " + n + " from a static function" };
+		}
 		return native_call(n, m, a, line);
 	}
 
@@ -1654,6 +1674,13 @@ class Compiler {
 			return { l->c, l->t, "(" + l->c + " = %v)", true, n, l->ref };
 		}
 		if (const Member *m = find_member(n)) {
+			if (m->is_static) {
+				std::string c = member_owner(n)->struct_name() + "::s_" + n + "()";
+				return { c, m->t, "(" + c + " = %v)", true, "", m->ref };
+			}
+			if (cur->is_static) {
+				throw Err{ line, "cannot use instance member " + n + " from a static function" };
+			}
 			return { "m_" + n, m->t, "(m_" + n + " = %v)", true, "", m->ref };
 		}
 		if (const Const *c = find_const(n)) {
@@ -1667,6 +1694,9 @@ class Compiler {
 		}
 		NativeMember m = classes.property(native(), n);
 		if (m.found) {
+			if (cur->is_static) {
+				throw Err{ line, "cannot use instance property " + n + " from a static function" };
+			}
 			std::string get = "owner->get(GN_SN(\"" + n + "\"))";
 			E e{ m.type == Ty::Var ? get : "(" + get + ").operator " + cty(m.type) + "()", m.type };
 			e.set = "owner->set(GN_SN(\"" + n + "\"), Variant(%v))";
@@ -2223,6 +2253,7 @@ class Compiler {
 	void top_level() {
 		while (tk().k != TK::Eof) {
 			int line = ln();
+			bool stat = eat("static");
 			if (tk().k == TK::NL) {
 				p++;
 			} else if (eat("signal")) {
@@ -2324,6 +2355,7 @@ class Compiler {
 				m.name = ident();
 				m.line = line;
 				m.onready = next_onready;
+				m.is_static = stat;
 				m.usage = next_usage;
 				next_onready = false;
 				next_usage = 4096;
@@ -2355,6 +2387,7 @@ class Compiler {
 				f.name = ident();
 				f.line = line;
 				f.abstract = next_abstract;
+				f.is_static = stat;
 				next_abstract = false;
 				expect("(");
 				while (!is(")")) {
@@ -2468,6 +2501,10 @@ class Compiler {
 		}
 	}
 
+	static std::string owner_local(const std::string &body) {
+		return body.find("owner") == std::string::npos ? "" : "Object *owner = gn::script_object(GN_FILE);\n";
+	}
+
 	std::string emit_fn(const Fn &f) {
 		if (f.abstract) {
 			return "gn::fail(\"Cannot call abstract function '" + f.name + "'.\", " + L(f.line) + ");\n";
@@ -2497,7 +2534,7 @@ class Compiler {
 			} catch (const Retry &) {
 			}
 		}
-		std::string body = out;
+		std::string body = (f.is_static ? owner_local(out) : "") + out;
 		if (f.coroutine) {
 			return body + "co_return Variant();\n";
 		}
@@ -2547,7 +2584,7 @@ public:
 		}
 		for (Fn &f : fns) {
 			Fn *up = const_cast<Fn *>(parent->find_fn(f.name));
-			if (f.name == "_init" || !up) {
+			if (f.name == "_init" || !up || f.is_static || up->is_static) {
 				continue;
 			}
 			if (f.async_shape != up->async_shape) {
@@ -2607,7 +2644,7 @@ public:
 			p = next.init;
 			E value = expr();
 			pass += std::string(count ? ", " : "") + guarded(value, next.t, next.ref, f.line);
-			decl += std::string("\t") + cty(f.ret) + " f_" + f.name + "(" + list + ");\n";
+			decl += std::string(f.is_static ? "\tstatic " : "\t") + cty(f.ret) + " f_" + f.name + "(" + list + ");\n";
 			defs += std::string(cty(f.ret)) + " C::f_" + f.name + "(" + list + ") {\n\treturn f_" + f.name + "(" + pass + ");\n}\n\n";
 		}
 		scopes.assign(1, {});
@@ -2615,8 +2652,26 @@ public:
 
 	void emit(const std::set<std::string> &virtuals, std::string &header, std::string &source) {
 		const std::string id = file_id(), self = struct_name();
-		std::string decl, defs, mtab, ptab, members_init, ready_init;
+		std::string decl, defs, mtab, ptab, stab, members_init, ready_init, statics_init, statics_clear;
+		static_fn.name = "static_init";
+		static_fn.is_static = true;
 		for (const Member &m : members) {
+			if (m.is_static) {
+				const std::string ty = cty(m.t), s_name = "s_" + m.name;
+				decl += "\tstatic " + ty + " &" + s_name + "();\n";
+				defs += ty + " &C::" + s_name + "() {\n\tstatic " + ty + " *v = new " + ty + "();\n\treturn *v;\n}\n\n";
+				statics_clear += s_name + "() = " + ty + "();\n";
+				cur = &static_fn;
+				if (m.init) {
+					p = m.init;
+					E e = expr();
+					statics_init += s_name + "() = " + guarded(e, m.t, m.ref, m.line) + ";\n";
+				} else if (!m.ref.elem.empty()) {
+					statics_init += s_name + "() = gn::typed_array(Array(), " + m.ref.elem + ", " + L(m.line) + ");\n";
+				}
+				cur = &init_fn;
+				continue;
+			}
 			decl += std::string("\t") + cty(m.t) + " m_" + m.name + "{};\n";
 			if (m.init) {
 				p = m.init;
@@ -2628,7 +2683,7 @@ public:
 		}
 		for (const Fn &f : fns) {
 			std::string sig = std::string(cty(f.ret)) + " C::f_" + f.name + "(";
-			std::string d = std::string("\t") + (virtuals.count(f.name) ? "virtual " : "") + cty(f.ret) + " f_" + f.name + "(";
+			std::string d = std::string("\t") + (f.is_static ? "static " : virtuals.count(f.name) ? "virtual " : "") + cty(f.ret) + " f_" + f.name + "(";
 			int i = 0;
 			std::string names;
 			for (const Param &a : f.params) {
@@ -2640,7 +2695,7 @@ public:
 			decl += d + ");\n";
 			if (f.coroutine) {
 				std::string params = sig.substr(sig.find('(') + 1);
-				decl += "\tgn::Task cf_" + f.name + "(" + params + ");\n";
+				decl += std::string(f.is_static ? "\tstatic " : "\t") + "gn::Task cf_" + f.name + "(" + params + ");\n";
 				defs += sig + ") {\n\treturn gn::run(cf_" + f.name + "(" + names + "));\n}\n\n";
 				defs += "gn::Task C::cf_" + f.name + "(" + params + ") {\n" + emit_fn(f) + "}\n\n";
 			} else {
@@ -2655,11 +2710,20 @@ public:
 		}
 		std::map<std::string, const Fn *> table;
 		std::vector<std::string> all_signals;
-		int props = 0, rows = 0;
+		int props = 0, statics = 0, rows = 0;
 		bool has_onready = false;
-		std::string notify;
+		std::string notify, constants;
 		for (const Compiler *c : lineage) {
 			all_signals.insert(all_signals.end(), c->signals.begin(), c->signals.end());
+			for (const auto &kv : c->consts) {
+				size_t dot = kv.first.find('.');
+				if (dot == std::string::npos) {
+					constants += "\td[String(\"" + kv.first + "\")] = Variant(C::" + kv.second.c + ");\n";
+				} else {
+					std::string group = "String(\"" + kv.first.substr(0, dot) + "\")";
+					constants += "\t{ Dictionary e = d.get(" + group + ", Dictionary()); e[String(\"" + kv.first.substr(dot + 1) + "\")] = Variant(C::" + kv.second.c + "); d[" + group + "] = e; }\n";
+				}
+			}
 			for (const Fn &f : c->fns) {
 				if (f.name == "_notification") {
 					notify += "((C *)s)->" + c->struct_name() + "::f__notification(int64_t(*a[0])); ";
@@ -2670,6 +2734,13 @@ public:
 			for (const Member &m : c->members) {
 				has_onready = has_onready || m.onready;
 				std::string loc = "gn::Loc{ \"" + c->path + "\", \"" + m.name + "\", " + std::to_string(m.line) + " }";
+				if (m.is_static) {
+					std::string v = c->guard(m.t == Ty::Var ? "v" : c->unsafe ? std::string("v.operator ") + cty(m.t) + "()" : std::string("gn::cast<") + cty(m.t) + ">(v, Variant::" + vty(m.t) + ", " + loc + ")", m.ref, loc);
+					std::string slot = c->struct_name() + "::s_" + m.name + "()";
+					stab += "\t{ \"" + m.name + "\", (GDExtensionVariantType)Variant::" + vty(m.t) + ", [](void *, Variant &r) { r = Variant(" + slot + "); }, [](void *, const Variant &v) { " + slot + " = " + v + "; }, 0 },\n";
+					statics++;
+					continue;
+				}
 				std::string setv = c->guard(m.t == Ty::Var ? "v" : c->unsafe ? std::string("v.operator ") + cty(m.t) + "()" : std::string("gn::cast<") + cty(m.t) + ">(v, Variant::" + vty(m.t) + ", " + loc + ")", m.ref, loc);
 				ptab += "\t{ \"" + m.name + "\", (GDExtensionVariantType)Variant::" + vty(m.t) + ", [](void *s, Variant &r) { r = Variant(((C *)s)->m_" + m.name + "); }, [](void *s, const Variant &v) { ((C *)s)->m_" + m.name + " = " + setv + "; }, " + std::to_string(m.usage) + " },\n";
 				props++;
@@ -2677,8 +2748,8 @@ public:
 		}
 		for (const auto &kv : table) {
 			const Fn &f = *kv.second;
-			std::string body = (has_onready && f.name == "_ready" ? "((C *)s)->ready_init(); " : "") + dispatch(f, "((C *)s)->f_" + f.name, true);
-			mtab += "\t{ \"" + f.name + "\", " + std::to_string(f.params.size()) + ", " + std::to_string(f.required()) + ", [](void *s, const Variant **a, int n, Variant &r) { " + body + " } },\n";
+			std::string body = (has_onready && f.name == "_ready" ? "((C *)s)->ready_init(); " : "") + dispatch(f, (f.is_static ? "C::f_" : "((C *)s)->f_") + f.name, true);
+			mtab += "\t{ \"" + f.name + "\", " + std::to_string(f.params.size()) + ", " + std::to_string(f.required()) + ", [](void *s, const Variant **a, int n, Variant &r) { " + body + " }, " + (f.is_static ? "true" : "false") + " },\n";
 			rows++;
 		}
 		if (has_onready && !table.count("_ready")) {
@@ -2710,17 +2781,22 @@ public:
 		}
 		header += "\nnamespace gn_gen {\n\nusing namespace godot;\n\nstruct " + self + (parent ? " : " + parent->struct_name() : "") + " {\n";
 		header += parent ? "" : "\tObject *owner = nullptr;\n";
-		header += const_block + decl + "\tvoid init();\n\tvoid ready_init();\n};\n\n} // namespace gn_gen\n";
+		header += const_block + decl + "\tvoid init();\n\tvoid ready_init();\n\tstatic void static_init();\n\tstatic void static_clear();\n};\n\n} // namespace gn_gen\n";
 
 		source = "// Generated by GodotNative from " + path + ". Do not edit.\n#define GN_FILE \"" + path + "\"\n#include \"" + id + ".gen.h\"\n\nnamespace gn_gen {\n\nusing C = " + self + ";\n\n";
 		source += const_defs + "void C::init() {\n" + (parent ? parent->struct_name() + "::init();\n" : std::string()) + members_init + "}\n\n";
 		source += "void C::ready_init() {\n" + (parent ? parent->struct_name() + "::ready_init();\n" : std::string()) + ready_init + "}\n\n" + defs;
+		bool has_static_init = std::any_of(fns.begin(), fns.end(), [](const Fn &f) { return f.name == "_static_init"; });
+		source += "void C::static_init() {\n\tstatic bool done = false;\n\tif (done) {\n\t\treturn;\n\t}\n\tdone = true;\n" + (parent ? parent->struct_name() + "::static_init();\n" : std::string()) + owner_local(statics_init) + statics_init + (has_static_init ? "f__static_init();\n" : "") + "}\n\n";
+		source += "void C::static_clear() {\n" + statics_clear + "}\n\n";
 		source += "namespace {\n\nconst gn::Method methods[] = {\n" + mtab + "\t{ nullptr, 0, 0, nullptr },\n};\n";
 		source += "const gn::Prop props[] = {\n" + ptab + "\t{ nullptr, GDEXTENSION_VARIANT_TYPE_NIL, nullptr, nullptr, 0 },\n};\n";
-		source += "const char *const signal_names[] = { " + signal_list + "nullptr };\n\n";
+		source += "const char *const signal_names[] = { " + signal_list + "nullptr };\n";
+		source += "const gn::Prop statics[] = {\n" + stab + "\t{ nullptr, GDEXTENSION_VARIANT_TYPE_NIL, nullptr, nullptr, 0 },\n};\n\n";
+		source += "void constants(Dictionary &d) {\n" + constants + "}\n\n";
 		source += "void *create(Object *owner, const Variant **a, int n) {\n\tC *c = new C();\n\tc->owner = owner;\n\tauto run = [&]() {\n\t\tc->init();\n" + call_init + "\t};\n\ttry {\n\t\trun();\n\t} catch (const gn::Abort &) {\n\t}\n\treturn c;\n}\n\n";
 		source += "void destroy(void *self) { delete (C *)self; }\n\n";
-		source += "const gn::Class klass = { \"" + path + "\", \"" + native() + "\", \"" + global + "\", create, destroy, methods, " + std::to_string(rows) + ", props, " + std::to_string(props) + ", " + (parent ? "\"" + parent->path + "\"" : std::string("nullptr")) + ", signal_names, " + std::to_string(all_signals.size()) + ", " + (is_abstract ? "true" : "false") + " };\n";
+		source += "const gn::Class klass = { \"" + path + "\", \"" + native() + "\", \"" + global + "\", create, destroy, methods, " + std::to_string(rows) + ", props, " + std::to_string(props) + ", " + (parent ? "\"" + parent->path + "\"" : std::string("nullptr")) + ", signal_names, " + std::to_string(all_signals.size()) + ", " + (is_abstract ? "true" : "false") + ", statics, " + std::to_string(statics) + ", C::static_init, C::static_clear, constants };\n";
 		source += "gn::Registrar reg(&klass);\n\n} // namespace\n\n} // namespace gn_gen\n";
 	}
 };
