@@ -304,6 +304,7 @@ struct Fn {
 	bool async_shape = false;
 	bool abstract = false;
 	bool is_static = false;
+	std::string accessor_of;
 	int required() const {
 		int n = 0;
 		for (const Param &a : params) {
@@ -323,6 +324,7 @@ struct Member {
 	int usage = 4096;
 	bool enum_auto = false;
 	std::string enum_prev;
+	std::string getter, setter;
 	size_t init = 0;
 	int line = 0;
 };
@@ -969,6 +971,20 @@ class Compiler {
 		E e{ s + ")", f->ret };
 		if (!f->async_shape) {
 			e.ref = f->ret_ref;
+		}
+		return e;
+	}
+
+	E through_accessors(E e, const Member &m, int line) {
+		if (!m.getter.empty() && cur->name != m.getter) {
+			e.c = conv(self_call(find_fn(m.getter), {}, line), m.t, line);
+			e.lv = false;
+		}
+		if (!m.setter.empty() && cur->name != m.setter) {
+			E value{ "%v", m.t };
+			value.ref = m.ref;
+			e.set = self_call(find_fn(m.setter), { value }, line).c;
+			e.lv = false;
 		}
 		return e;
 	}
@@ -1676,12 +1692,12 @@ class Compiler {
 		if (const Member *m = find_member(n)) {
 			if (m->is_static) {
 				std::string c = member_owner(n)->struct_name() + "::s_" + n + "()";
-				return { c, m->t, "(" + c + " = %v)", true, "", m->ref };
+				return through_accessors({ c, m->t, "(" + c + " = %v)", true, "", m->ref }, *m, line);
 			}
 			if (cur->is_static) {
 				throw Err{ line, "cannot use instance member " + n + " from a static function" };
 			}
-			return { "m_" + n, m->t, "(m_" + n + " = %v)", true, "", m->ref };
+			return through_accessors({ "m_" + n, m->t, "(m_" + n + " = %v)", true, "", m->ref }, *m, line);
 		}
 		if (const Const *c = find_const(n)) {
 			return { c->c, c->t };
@@ -2236,7 +2252,11 @@ class Compiler {
 	}
 
 	void skip_block() {
+		bool one_line = tk().k != TK::NL;
 		skip_line();
+		if (one_line) {
+			return;
+		}
 		if (tk().k != TK::Indent) {
 			throw Err{ ln(), "expected an indented block" };
 		}
@@ -2247,6 +2267,112 @@ class Compiler {
 		skip_line();
 		if (tk().k == TK::Indent) {
 			skip_indented();
+		}
+	}
+
+	void finish_fn(Fn &f) {
+		expect(":");
+		f.body = p;
+		skip_block();
+		f.declared = f.ret;
+		f.coroutine = awaits_between(f.body, p);
+		if (f.coroutine) {
+			f.ret = Ty::Var;
+			f.async_shape = true;
+		}
+		fns.push_back(f);
+	}
+
+	size_t property_colon() const {
+		int depth = 0;
+		for (size_t q = p; t[q].k != TK::Eof && (t[q].k != TK::NL || depth > 0); q++) {
+			if (t[q].k == TK::Id && t[q].s == "func") {
+				return 0;
+			}
+			depth += t[q].s == "(" || t[q].s == "[" || t[q].s == "{";
+			depth -= t[q].s == ")" || t[q].s == "]" || t[q].s == "}";
+			if (depth == 0 && t[q].k == TK::Op && t[q].s == ":" && property_follows(q)) {
+				return q;
+			}
+		}
+		return 0;
+	}
+
+	bool property_follows(size_t colon) const {
+		const Tok &next = t[colon + 1];
+		return next.k == TK::NL || (next.k == TK::Id && (next.s == "get" || next.s == "set"));
+	}
+
+	void skip_initializer() {
+		size_t colon = property_colon();
+		if (colon) {
+			p = colon;
+		} else {
+			skip_value();
+		}
+	}
+
+	void property_accessor(Member &m, bool getter) {
+		Fn f;
+		f.line = ln();
+		f.name = "gs_" + m.name + (getter ? "_get" : "_set");
+		f.accessor_of = m.name;
+		f.is_static = m.is_static;
+		if (getter) {
+			if (eat("(")) {
+				expect(")");
+			}
+			m.getter = f.name;
+		} else {
+			expect("(");
+			Param a;
+			a.name = ident();
+			expect(")");
+			f.params.push_back(a);
+			f.ret = Ty::Void;
+			m.setter = f.name;
+		}
+		finish_fn(f);
+	}
+
+	void property_block(Member &m) {
+		expect(":");
+		bool block = tk().k == TK::NL;
+		if (block) {
+			while (tk().k == TK::NL) {
+				p++;
+			}
+			if (tk().k != TK::Indent) {
+				throw Err{ ln(), "expected an indented block" };
+			}
+			p++;
+		}
+		for (;;) {
+			bool getter = is("get");
+			if (!getter && !is("set")) {
+				throw Err{ ln(), "expected get or set in property '" + m.name + "'" };
+			}
+			p++;
+			bool more = false;
+			if (eat("=")) {
+				(getter ? m.getter : m.setter) = ident();
+				more = eat(",");
+				if (!more) {
+					nl();
+				}
+			} else {
+				property_accessor(m, getter);
+			}
+			if (!block && !more) {
+				return;
+			}
+			while (block && tk().k == TK::NL) {
+				p++;
+			}
+			if (block && tk().k == TK::Dedent) {
+				p++;
+				return;
+			}
 		}
 	}
 
@@ -2363,20 +2489,24 @@ class Compiler {
 					m.init = p;
 					m.declared = true;
 					m.t = Ty::Void;
-					skip_value();
+					skip_initializer();
 				} else {
-					if (eat(":")) {
+					if (is(":") && !property_follows(p)) {
+						p++;
 						m.t = parse_type();
 						m.ref = last_ref;
 						m.declared = true;
 					}
 					if (tk().k == TK::NL) {
 						p++;
-					} else {
+					} else if (!is(":")) {
 						expect("=");
 						m.init = p;
-						skip_value();
+						skip_initializer();
 					}
+				}
+				if (is(":")) {
+					property_block(m);
 				}
 				if (!m.declared) {
 					warn(line, "member '" + m.name + "' has no type and stays a Variant");
@@ -2435,16 +2565,7 @@ class Compiler {
 					fns.push_back(f);
 					continue;
 				}
-				expect(":");
-				f.body = p;
-				skip_block();
-				f.declared = f.ret;
-				f.coroutine = awaits_between(f.body, p);
-				if (f.coroutine) {
-					f.ret = Ty::Var;
-					f.async_shape = true;
-				}
-				fns.push_back(f);
+				finish_fn(f);
 			} else {
 				throw Err{ line, "'" + tk().s + "' is not supported at class level in a native file" };
 			}
@@ -2498,6 +2619,21 @@ class Compiler {
 				m.t = e.t;
 				m.ref = e.ref;
 			}
+			for (Fn &f : fns) {
+				if (f.accessor_of != m.name) {
+					continue;
+				}
+				if (!f.params.empty()) {
+					f.params[0].t = m.t;
+					f.params[0].ref = m.ref;
+				} else if (!f.coroutine) {
+					f.ret = f.declared = m.t;
+					f.ret_ref = m.ref;
+				}
+			}
+			if ((!m.getter.empty() && !find_fn(m.getter)) || (!m.setter.empty() && !find_fn(m.setter))) {
+				throw Err{ m.line, "property '" + m.name + "' names an unknown function" };
+			}
 		}
 	}
 
@@ -2521,12 +2657,16 @@ class Compiler {
 					declare(a.name, a.t, false, "", a.ref);
 				}
 				p = f.body;
+				scopes.emplace_back();
+				if (tk().k != TK::NL) {
+					stmt();
+					break;
+				}
 				nl();
 				if (tk().k != TK::Indent) {
 					throw Err{ ln(), "expected an indented block" };
 				}
 				p++;
-				scopes.emplace_back();
 				while (tk().k != TK::Dedent) {
 					stmt();
 				}
@@ -2727,7 +2867,7 @@ public:
 			for (const Fn &f : c->fns) {
 				if (f.name == "_notification") {
 					notify += "((C *)s)->" + c->struct_name() + "::f__notification(int64_t(*a[0])); ";
-				} else if (f.name != "_init") {
+				} else if (f.name != "_init" && f.accessor_of.empty()) {
 					table[f.name] = &f;
 				}
 			}
@@ -2737,12 +2877,16 @@ public:
 				if (m.is_static) {
 					std::string v = c->guard(m.t == Ty::Var ? "v" : c->unsafe ? std::string("v.operator ") + cty(m.t) + "()" : std::string("gn::cast<") + cty(m.t) + ">(v, Variant::" + vty(m.t) + ", " + loc + ")", m.ref, loc);
 					std::string slot = c->struct_name() + "::s_" + m.name + "()";
-					stab += "\t{ \"" + m.name + "\", (GDExtensionVariantType)Variant::" + vty(m.t) + ", [](void *, Variant &r) { r = Variant(" + slot + "); }, [](void *, const Variant &v) { " + slot + " = " + v + "; }, 0 },\n";
+					std::string read = m.getter.empty() ? slot : "C::f_" + m.getter + "()";
+					std::string write = m.setter.empty() ? slot + " = " + v : "C::f_" + m.setter + "(" + v + ")";
+					stab += "\t{ \"" + m.name + "\", (GDExtensionVariantType)Variant::" + vty(m.t) + ", [](void *, Variant &r) { r = Variant(" + read + "); }, [](void *, const Variant &v) { " + write + "; }, 0 },\n";
 					statics++;
 					continue;
 				}
 				std::string setv = c->guard(m.t == Ty::Var ? "v" : c->unsafe ? std::string("v.operator ") + cty(m.t) + "()" : std::string("gn::cast<") + cty(m.t) + ">(v, Variant::" + vty(m.t) + ", " + loc + ")", m.ref, loc);
-				ptab += "\t{ \"" + m.name + "\", (GDExtensionVariantType)Variant::" + vty(m.t) + ", [](void *s, Variant &r) { r = Variant(((C *)s)->m_" + m.name + "); }, [](void *s, const Variant &v) { ((C *)s)->m_" + m.name + " = " + setv + "; }, " + std::to_string(m.usage) + " },\n";
+				std::string read = "((C *)s)->" + (m.getter.empty() ? "m_" + m.name : "f_" + m.getter + "()");
+				std::string write = m.setter.empty() ? "((C *)s)->m_" + m.name + " = " + setv : "((C *)s)->f_" + m.setter + "(" + setv + ")";
+				ptab += "\t{ \"" + m.name + "\", (GDExtensionVariantType)Variant::" + vty(m.t) + ", [](void *s, Variant &r) { r = Variant(" + read + "); }, [](void *s, const Variant &v) { " + write + "; }, " + std::to_string(m.usage) + " },\n";
 				props++;
 			}
 		}
