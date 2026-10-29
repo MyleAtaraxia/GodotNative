@@ -20,6 +20,12 @@ struct Tok {
 	int line;
 };
 
+struct InnerDecl {
+	std::string name;
+	std::vector<Tok> tokens;
+	bool is_abstract = false;
+};
+
 struct Err {
 	int line;
 	std::string msg;
@@ -410,7 +416,9 @@ class Compiler {
 	std::set<std::string> enums;
 	std::map<std::string, Const> consts;
 	TypeRef last_ref;
-	bool next_onready = false, next_abstract = false, is_abstract = false;
+	bool next_onready = false, next_abstract = false, next_class_abstract = false, is_abstract = false;
+	std::set<std::string> inners;
+	mutable std::map<std::string, Const> outer_consts;
 	int next_usage = 4096;
 	std::vector<std::pair<int, int>> quiet;
 	size_t lambda_end = size_t(-1);
@@ -533,12 +541,73 @@ class Compiler {
 
 	static bool numeric(Ty x) { return x == Ty::Int || x == Ty::Float; }
 
+	static std::set<std::string> inner_names(const std::vector<Tok> &toks) {
+		std::set<std::string> r;
+		std::vector<std::pair<std::string, int>> open;
+		int depth = 0;
+		for (size_t q = 0; q + 1 < toks.size(); q++) {
+			depth += toks[q].k == TK::Indent;
+			if (toks[q].k == TK::Dedent) {
+				depth--;
+				while (!open.empty() && depth <= open.back().second) {
+					open.pop_back();
+				}
+			}
+			if (toks[q].k == TK::Id && toks[q].s == "class" && depth == (int)open.size()) {
+				std::string n = (open.empty() ? "" : open.back().first + ".") + toks[q + 1].s;
+				r.insert(n);
+				open.push_back({ n, depth });
+			}
+		}
+		return r;
+	}
+
+	std::string class_path(const std::string &n) const {
+		for (const Compiler *c = this; c; c = c->outer) {
+			for (const Compiler *k = c; k; k = k->parent) {
+				if (k->inners.count(n)) {
+					return k->path + "::" + n;
+				}
+			}
+		}
+		return "";
+	}
+
+	std::string inner_of(const std::string &root, const std::string &rest) const {
+		size_t sep = root.find("::");
+		std::string file = root.substr(0, sep), src;
+		if (root.empty() || !classes.read(file, src)) {
+			return "";
+		}
+		std::string name = sep == std::string::npos ? "" : root.substr(sep + 2) + "::";
+		name += rest;
+		for (size_t at = name.find("::"); at != std::string::npos; at = name.find("::")) {
+			name.replace(at, 2, ".");
+		}
+		if (!inner_names(tokenize(src)).count(name)) {
+			return "";
+		}
+		for (size_t at = name.find('.'); at != std::string::npos; at = name.find('.')) {
+			name.replace(at, 1, "::");
+		}
+		return file + "::" + name;
+	}
+
+	bool has_enum(const std::string &n) const {
+		return enums.count(n) || (outer && outer->has_enum(n));
+	}
+
 	Ty parse_type() {
 		std::string n = ident();
-		if (eat(".")) {
-			ident();
+		if (is(".")) {
+			std::string rest;
+			while (eat(".")) {
+				rest += (rest.empty() ? "" : ".") + ident();
+			}
+			std::string root = class_path(n);
 			last_ref = TypeRef();
-			return Ty::Int;
+			last_ref.script = inner_of(root.empty() ? classes.global_class_path(n) : root, rest);
+			return last_ref.script.empty() ? Ty::Int : Ty::Var;
 		}
 		std::string elem;
 		Ty elem_t = Ty::Var;
@@ -560,8 +629,12 @@ class Compiler {
 		if (it != m.end()) {
 			return it->second;
 		}
-		if (enums.count(n)) {
+		if (has_enum(n)) {
 			return Ty::Int;
+		}
+		last_ref.script = class_path(n);
+		if (!last_ref.script.empty()) {
+			return Ty::Var;
 		}
 		auto b = builtin_ctors().find(n);
 		if (b != builtin_ctors().end()) {
@@ -887,7 +960,19 @@ class Compiler {
 		if (c != consts.end()) {
 			return &c->second;
 		}
-		return parent ? parent->find_const(n) : nullptr;
+		if (const Const *up = parent ? parent->find_const(n) : nullptr) {
+			return up;
+		}
+		const Const *found = outer ? outer->find_const(n) : nullptr;
+		if (!found) {
+			return nullptr;
+		}
+		Const &q = outer_consts[n];
+		q = *found;
+		if (q.c.rfind("C_", 0) != 0) {
+			q.c = outer->struct_name() + "::" + q.c;
+		}
+		return &q;
 	}
 
 	const Local *find_local(const std::string &n) const {
@@ -1577,6 +1662,10 @@ class Compiler {
 				return is("(") ? named(m, line) : field(m, line);
 			}
 			return { "Variant(owner)", Ty::Var };
+		}
+		if (!find_local(n) && !find_member(n) && !find_const(n) && !class_path(n).empty()) {
+			p++;
+			return { "gn::load(String(\"" + class_path(n) + "\"))", Ty::Var };
 		}
 		bool dotted = t[p + 1].k == TK::Op && t[p + 1].s == "." && !find_local(n) && !find_member(n) && !find_const(n);
 		if (dotted) {
@@ -2382,6 +2471,37 @@ class Compiler {
 			bool stat = eat("static");
 			if (tk().k == TK::NL) {
 				p++;
+			} else if (eat("pass")) {
+				nl();
+			} else if (eat("class")) {
+				InnerDecl d;
+				d.name = ident();
+				d.is_abstract = next_class_abstract;
+				next_class_abstract = false;
+				if (is("extends")) {
+					size_t from = p;
+					while (!is(":")) {
+						p++;
+					}
+					d.tokens.assign(t.begin() + from, t.begin() + p);
+					d.tokens.push_back({ TK::NL, "", line });
+				}
+				expect(":");
+				size_t from = p;
+				bool one_line = tk().k != TK::NL;
+				skip_line();
+				size_t to = p;
+				if (!one_line) {
+					if (tk().k != TK::Indent) {
+						throw Err{ ln(), "expected an indented block" };
+					}
+					from = p + 1;
+					skip_indented();
+					to = p - 1;
+				}
+				d.tokens.insert(d.tokens.end(), t.begin() + from, t.begin() + to);
+				d.tokens.push_back({ TK::Eof, "", line });
+				inner_decls.push_back(std::move(d));
 			} else if (eat("signal")) {
 				signals.push_back(ident());
 				if (eat("(")) {
@@ -2431,11 +2551,19 @@ class Compiler {
 					extends_ref = classes.absolute(path, t[p++].s);
 				} else {
 					base = ident();
-					if (!classes.class_exists(base)) {
+					extends_ref = class_path(base);
+					if (extends_ref.empty() && !classes.class_exists(base)) {
 						extends_ref = classes.global_class_path(base);
 						if (extends_ref.empty()) {
 							throw Err{ line, "unknown class " + base };
 						}
+					}
+				}
+				while (eat(".")) {
+					std::string name = ident();
+					extends_ref = inner_of(extends_ref, name);
+					if (extends_ref.empty()) {
+						throw Err{ line, "unknown class " + name };
 					}
 				}
 				extends_line = line;
@@ -2474,7 +2602,7 @@ class Compiler {
 					while (t[q].k == TK::NL) {
 						q++;
 					}
-					(t[q].s == "func" ? next_abstract : is_abstract) = true;
+					(t[q].s == "func" ? next_abstract : t[q].s == "class" ? next_class_abstract : is_abstract) = true;
 				}
 			} else if (eat("var")) {
 				Member m;
@@ -2687,7 +2815,8 @@ class Compiler {
 	}
 
 public:
-	Compiler *parent = nullptr;
+	Compiler *parent = nullptr, *outer = nullptr;
+	std::vector<InnerDecl> inner_decls;
 	std::string extends_ref, chain;
 	int extends_line = 0;
 
@@ -2695,9 +2824,12 @@ public:
 			t(std::move(toks)), path(std::move(p_path)), classes(q), unsafe(p_unsafe) {}
 
 	void scan() {
+		inners = inner_names(t);
 		scan_warning_ignores();
 		top_level();
 	}
+	bool unsafe_mode() const { return unsafe; }
+	void mark_abstract() { is_abstract = true; }
 	const std::string &script_path() const { return path; }
 	std::string file_id() const { return sanitize(path); }
 	const std::set<std::string> &warning_set() const { return warnings; }
@@ -2709,6 +2841,9 @@ public:
 		resolved = true;
 		if (parent) {
 			parent->resolve();
+		}
+		if (outer) {
+			outer->resolve();
 		}
 		out.clear();
 		init_fn.name = "init";
@@ -2864,6 +2999,11 @@ public:
 					constants += "\t{ Dictionary e = d.get(" + group + ", Dictionary()); e[String(\"" + kv.first.substr(dot + 1) + "\")] = Variant(C::" + kv.second.c + "); d[" + group + "] = e; }\n";
 				}
 			}
+			for (const std::string &name : c->inners) {
+				if (name.find('.') == std::string::npos) {
+					constants += "\td[String(\"" + name + "\")] = gn::native_script(\"" + c->path + "::" + name + "\");\n";
+				}
+			}
 			for (const Fn &f : c->fns) {
 				if (f.name == "_notification") {
 					notify += "((C *)s)->" + c->struct_name() + "::f__notification(int64_t(*a[0])); ";
@@ -2923,6 +3063,9 @@ public:
 		if (parent) {
 			header += "#include \"" + parent->file_id() + ".gen.h\"\n";
 		}
+		if (outer) {
+			header += "#include \"" + outer->file_id() + ".gen.h\"\n";
+		}
 		header += "\nnamespace gn_gen {\n\nusing namespace godot;\n\nstruct " + self + (parent ? " : " + parent->struct_name() : "") + " {\n";
 		header += parent ? "" : "\tObject *owner = nullptr;\n";
 		header += const_block + decl + "\tvoid init();\n\tvoid ready_init();\n\tstatic void static_init();\n\tstatic void static_clear();\n};\n\n} // namespace gn_gen\n";
@@ -2963,13 +3106,33 @@ class Project {
 			}
 			return found->second.get();
 		}
-		std::string src;
-		if (!query.read(path, src)) {
-			throw ProjectError{ where + ": could not read the file" };
-		}
 		Compiler *c = nullptr;
 		try {
-			auto u = std::make_unique<Compiler>(tokenize(src), path, query, first_line(src) == "#pragma native unsafe");
+			std::unique_ptr<Compiler> u;
+			size_t sep = path.rfind("::");
+			if (sep != std::string::npos) {
+				Compiler *o = load(path.substr(0, sep), chain);
+				found = units.find(path);
+				if (found != units.end()) {
+					return found->second.get();
+				}
+				std::string name = path.substr(sep + 2);
+				auto d = std::find_if(o->inner_decls.begin(), o->inner_decls.end(), [&](const InnerDecl &i) { return i.name == name; });
+				if (d == o->inner_decls.end()) {
+					throw ProjectError{ where + ": unknown inner class" };
+				}
+				u = std::make_unique<Compiler>(d->tokens, path, query, o->unsafe_mode());
+				u->outer = o;
+				if (d->is_abstract) {
+					u->mark_abstract();
+				}
+			} else {
+				std::string src;
+				if (!query.read(path, src)) {
+					throw ProjectError{ where + ": could not read the file" };
+				}
+				u = std::make_unique<Compiler>(tokenize(src), path, query, first_line(src) == "#pragma native unsafe");
+			}
 			c = u.get();
 			units[path] = std::move(u);
 			c->chain = where;
@@ -2981,6 +3144,9 @@ class Project {
 			c->parent = load(c->extends_ref, where);
 		}
 		order.push_back(c);
+		for (const InnerDecl &d : c->inner_decls) {
+			load(c->script_path() + "::" + d.name, where);
+		}
 		return c;
 	}
 
@@ -3015,7 +3181,7 @@ public:
 			r.files.push_back({ c->file_id() + ".gen.h", h });
 			r.files.push_back({ c->file_id() + ".cpp", cpp });
 			r.warnings.insert(r.warnings.end(), c->warning_set().begin(), c->warning_set().end());
-			if (std::find(toggled.begin(), toggled.end(), c->script_path()) == toggled.end()) {
+			if (!c->outer && std::find(toggled.begin(), toggled.end(), c->script_path()) == toggled.end()) {
 				r.implied.push_back(c->script_path());
 			}
 		}

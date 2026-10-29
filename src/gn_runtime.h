@@ -80,6 +80,7 @@ Variant construct(Variant::Type type, std::initializer_list<Variant> args, const
 Variant instantiate(const StringName &cls);
 Variant singleton(const StringName &name);
 Variant load(const String &path);
+Variant native_script(const char *path);
 Object *script_object(const char *path);
 Variant static_call(GDExtensionMethodBindPtr mb, std::initializer_list<Variant> args, const Loc &loc);
 GDExtensionMethodBindPtr method_bind(const char *cls, const char *name, int64_t hash);

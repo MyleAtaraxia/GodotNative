@@ -468,9 +468,10 @@ bool is_script(const Variant &v, const char *path) {
 	Variant self = v;
 	Variant script = self.call(GN_SN("get_script"));
 	String want = path;
+	Variant inner = want.contains("::") ? load(want) : Variant();
 	while (script.get_type() == Variant::OBJECT && script.booleanize()) {
 		bool valid = false;
-		if (String(script.get_named(GN_SN("resource_path"), valid)) == want) {
+		if (String(script.get_named(GN_SN("resource_path"), valid)) == want || (inner.booleanize() && script == inner)) {
 			return true;
 		}
 		script = script.call(GN_SN("get_base_script"));
@@ -707,7 +708,20 @@ Variant singleton(const StringName &name) {
 }
 
 Variant load(const String &path) {
-	return ResourceLoader::get_singleton()->call(GN_SN("load"), path);
+	int sep = path.find("::");
+	if (sep < 0) {
+		return ResourceLoader::get_singleton()->call(GN_SN("load"), path);
+	}
+	Variant script = load(path.substr(0, sep));
+	for (const String &name : path.substr(sep + 2).split("::")) {
+		bool valid = false;
+		script = script.get_named(name, valid);
+	}
+	return script;
+}
+
+Variant native_script(const char *path) {
+	return NativeScript::of(find_class(path));
 }
 
 Object *script_object(const char *path) {
@@ -828,7 +842,7 @@ Variant NativeScript::new_(const Variant **args, GDExtensionInt argc, GDExtensio
 
 Ref<Script> NativeScript::_get_base_script() const {
 	if (info->parent && base_script.is_null()) {
-		base_script = ResourceLoader::get_singleton()->load(info->parent);
+		base_script = Ref<Script>(Object::cast_to<Script>(gn::load(info->parent).operator Object *()));
 	}
 	return base_script;
 }
