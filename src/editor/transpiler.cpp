@@ -273,7 +273,7 @@ struct TypeRef {
 	std::string builtin;
 	std::string cls;
 	std::string script;
-	std::string elem;
+	std::string elem, elem_cls;
 	Ty elem_t = Ty::Var;
 	bool same(const TypeRef &o) const { return builtin == o.builtin && cls == o.cls && script == o.script && elem == o.elem; }
 	bool any() const { return !builtin.empty() || !cls.empty() || !script.empty(); }
@@ -287,6 +287,7 @@ struct E {
 	std::string local;
 	TypeRef ref;
 	bool literal = false;
+	std::vector<std::pair<Ty, std::string>> items;
 	std::string raw;
 	Ty elem_t = Ty::Var;
 };
@@ -310,6 +311,7 @@ struct Fn {
 	bool async_shape = false;
 	bool abstract = false;
 	bool is_static = false;
+	bool annotated = false;
 	std::string accessor_of;
 	int required() const {
 		int n = 0;
@@ -609,11 +611,12 @@ class Compiler {
 			last_ref.script = inner_of(root.empty() ? classes.global_class_path(n) : root, rest);
 			return last_ref.script.empty() ? Ty::Int : Ty::Var;
 		}
-		std::string elem;
+		std::string elem, elem_cls;
 		Ty elem_t = Ty::Var;
 		if (eat("[")) {
 			elem_t = parse_type();
 			elem = element_args(elem_t, last_ref);
+			elem_cls = last_ref.cls;
 			while (eat(",")) {
 				parse_type();
 			}
@@ -622,6 +625,7 @@ class Compiler {
 		last_ref = TypeRef();
 		if (n == "Array") {
 			last_ref.elem = elem;
+			last_ref.elem_cls = elem_cls;
 			last_ref.elem_t = elem_t;
 		}
 		static const std::map<std::string, Ty> m = { { "void", Ty::Void }, { "bool", Ty::Bool }, { "int", Ty::Int }, { "float", Ty::Float }, { "String", Ty::Str }, { "Vector2", Ty::V2 }, { "Vector3", Ty::V3 }, { "PackedFloat64Array", Ty::PF64 }, { "PackedInt64Array", Ty::PI64 }, { "Array", Ty::Arr }, { "Dictionary", Ty::Dict } };
@@ -681,17 +685,79 @@ class Compiler {
 		return v;
 	}
 
+	bool unrelated(const std::string &a, const std::string &b) const {
+		return !classes.inherits(a, b) && !classes.inherits(b, a);
+	}
+
+	const Compiler *unit(const std::string &script) const {
+		if (!project || script.empty()) {
+			return nullptr;
+		}
+		auto it = project->find(script);
+		return it == project->end() ? nullptr : it->second.get();
+	}
+
+	static bool descends(const Compiler *c, const Compiler *base) {
+		for (; c; c = c->parent) {
+			if (c == base) {
+				return true;
+			}
+		}
+		return false;
+	}
+
 	void check_assignable(const TypeRef &from, const TypeRef &to, int line) const {
 		bool arrays = !from.elem.empty() && !to.elem.empty() && from.elem != to.elem;
 		bool builtins = !from.builtin.empty() && !to.builtin.empty() && from.builtin != to.builtin;
-		bool natives = !from.cls.empty() && !to.cls.empty() && !classes.inherits(from.cls, to.cls) && !classes.inherits(to.cls, from.cls);
-		if (arrays || builtins || natives) {
+		bool natives = !from.cls.empty() && !to.cls.empty() && unrelated(from.cls, to.cls);
+		const Compiler *a = unit(from.script), *b = unit(to.script);
+		bool scripts = a && b && !descends(a, b) && !descends(b, a);
+		bool mixed = (a && !to.cls.empty() && unrelated(a->native(), to.cls)) || (b && !from.cls.empty() && unrelated(b->native(), from.cls));
+		if (arrays || builtins || natives || scripts || mixed) {
 			throw Err{ line, "cannot assign a value of an unrelated type" };
+		}
+	}
+
+	static int type_family(Ty t) {
+		switch (t) {
+			case Ty::Int:
+			case Ty::Float:
+			case Ty::Bool:
+				return 1;
+			case Ty::Str:
+				return 2;
+			case Ty::V2:
+				return 3;
+			case Ty::V3:
+				return 4;
+			case Ty::Arr:
+			case Ty::PF64:
+			case Ty::PI64:
+				return 5;
+			case Ty::Dict:
+				return 6;
+			default:
+				return 0;
+		}
+	}
+
+	void check_elements(const E &e, const TypeRef &r, int line) const {
+		bool objects = r.elem.rfind("Variant::OBJECT", 0) == 0;
+		for (const auto &item : e.items) {
+			int have = type_family(item.first), want = type_family(r.elem_t);
+			bool wrong_value = objects ? have != 0 : have && want && have != want;
+			bool wrong_class = !item.second.empty() && !r.elem_cls.empty() && unrelated(item.second, r.elem_cls);
+			if (wrong_value || wrong_class) {
+				throw Err{ line, "array literal has an element of the wrong type" };
+			}
 		}
 	}
 
 	std::string guarded(const E &e, Ty to, const TypeRef &r, int line) {
 		check_assignable(e.ref, r, line);
+		if (e.literal && !r.elem.empty()) {
+			check_elements(e, r, line);
+		}
 		std::string v = conv(e, to, line);
 		if (e.literal && !r.elem.empty()) {
 			return "gn::typed_array(" + v + ", " + r.elem + ", " + L(line) + ")";
@@ -1238,10 +1304,12 @@ class Compiler {
 			}
 		}
 		expect(")");
-		if (eat("->")) {
-			parse_type();
-		}
+		bool typed = eat("->");
+		Ty returns = typed ? parse_type() : Ty::Var;
 		expect(":");
+		if (typed && returns != Ty::Void && !body_returns(p)) {
+			throw Err{ line, "not all code paths return a value" };
+		}
 		fn.coroutine = lambda_awaits();
 		scopes.emplace_back();
 		if (tk().k == TK::NL) {
@@ -1546,8 +1614,10 @@ class Compiler {
 				if (eat("[")) {
 					std::string v = temp();
 					std::string s = "([&]() { Array " + v + ";";
+					std::vector<std::pair<Ty, std::string>> items;
 					while (!is("]")) {
 						E e = expr();
+						items.push_back({ e.t, e.ref.cls });
 						s += " " + v + ".push_back(" + conv(e, Ty::Var, line) + ");";
 						if (!eat(",")) {
 							break;
@@ -1556,6 +1626,7 @@ class Compiler {
 					expect("]");
 					E list{ s + " return " + v + "; }())", Ty::Arr };
 					list.literal = true;
+					list.items = items;
 					return list;
 				}
 				if (eat("{")) {
@@ -1988,6 +2059,14 @@ class Compiler {
 	}
 
 	void block() {
+		if (tk().k != TK::NL && !(lambda_inline > 0 && p == lambda_end)) {
+			scopes.emplace_back();
+			out += "{\n";
+			stmt();
+			out += "}\n";
+			scopes.pop_back();
+			return;
+		}
 		nl();
 		if (tk().k != TK::Indent) {
 			throw Err{ ln(), "expected an indented block" };
@@ -2375,6 +2454,130 @@ class Compiler {
 		}
 	}
 
+	bool at_header_end(size_t q, int depth) const {
+		return t[q].k == TK::Eof || (depth <= 0 && t[q].k == TK::Op && t[q].s == ":");
+	}
+
+	bool body_returns(size_t q) const {
+		if (t[q].k != TK::NL) {
+			return stmt_returns(q);
+		}
+		while (t[q].k == TK::NL) {
+			q++;
+		}
+		if (t[q].k != TK::Indent) {
+			return false;
+		}
+		q++;
+		bool returned = false;
+		while (t[q].k != TK::Dedent && t[q].k != TK::Eof) {
+			returned = stmt_returns(q) || returned;
+		}
+		return returned;
+	}
+
+	size_t after_body(size_t q) const {
+		if (t[q].k != TK::NL) {
+			return after_line(q);
+		}
+		q++;
+		while (t[q].k == TK::NL) {
+			q++;
+		}
+		if (t[q].k != TK::Indent) {
+			return q;
+		}
+		int d = 0;
+		do {
+			d += t[q].k == TK::Indent;
+			d -= t[q].k == TK::Dedent;
+			q++;
+		} while (d > 0 && t[q].k != TK::Eof);
+		return q;
+	}
+
+	size_t after_line(size_t q) const {
+		int depth = 0;
+		while (t[q].k != TK::Eof && (t[q].k != TK::NL || depth > 0)) {
+			depth += t[q].s == "(" || t[q].s == "[" || t[q].s == "{";
+			depth -= t[q].s == ")" || t[q].s == "]" || t[q].s == "}";
+			q++;
+		}
+		q += t[q].k == TK::NL;
+		return after_block(q);
+	}
+
+	size_t after_block(size_t q) const {
+		return t[q].k == TK::Indent ? after_body(q - 1) : q;
+	}
+
+	bool branch_returns(size_t &q, bool *wildcard = nullptr) const {
+		int depth = 0;
+		bool start = true, guard = false, any = false;
+		while (!at_header_end(q, depth)) {
+			any = any || (start && depth == 0 && (t[q].s == "_" || t[q].s == "var"));
+			guard = guard || (depth == 0 && t[q].s == "when");
+			depth += t[q].s == "(" || t[q].s == "[" || t[q].s == "{";
+			depth -= t[q].s == ")" || t[q].s == "]" || t[q].s == "}";
+			start = depth == 0 && t[q].s == ",";
+			q++;
+		}
+		if (wildcard) {
+			*wildcard = any && !guard;
+		}
+		q += t[q].k != TK::Eof;
+		bool r = body_returns(q);
+		q = after_body(q);
+		return r;
+	}
+
+	bool stmt_returns(size_t &q) const {
+		const std::string &word = t[q].k == TK::Id ? t[q].s : std::string();
+		if (t[q].k == TK::NL) {
+			q++;
+			return false;
+		}
+		if (word == "return") {
+			q = after_line(q);
+			return true;
+		}
+		if (word == "if") {
+			bool all = branch_returns(q), closed = false;
+			while (t[q].k == TK::Id && (t[q].s == "elif" || t[q].s == "else")) {
+				closed = closed || t[q].s == "else";
+				all = branch_returns(q) && all;
+			}
+			return all && closed;
+		}
+		if (word == "match") {
+			int depth = 0;
+			while (!at_header_end(q, depth)) {
+				depth += t[q].s == "(" || t[q].s == "[" || t[q].s == "{";
+				depth -= t[q].s == ")" || t[q].s == "]" || t[q].s == "}";
+				q++;
+			}
+			q++;
+			while (t[q].k == TK::NL) {
+				q++;
+			}
+			q += t[q].k == TK::Indent;
+			bool all = true, covered = false;
+			while (t[q].k != TK::Dedent && t[q].k != TK::Eof) {
+				if (t[q].k == TK::NL) {
+					q++;
+					continue;
+				}
+				bool wildcard = false;
+				all = branch_returns(q, &wildcard) && all;
+				covered = covered || wildcard;
+			}
+			q += t[q].k == TK::Dedent;
+			return all && covered;
+		}
+		q = after_line(q);
+		return false;
+	}
+
 	void declare_name(const std::string &n, int line) {
 		if (!declared_names.insert(n).second) {
 			throw Err{ line, "'" + n + "' is declared twice in this class" };
@@ -2711,6 +2914,7 @@ class Compiler {
 				if (eat("->")) {
 					f.ret = parse_type();
 					f.ret_ref = last_ref;
+					f.annotated = true;
 				} else {
 					warn(line, "function '" + f.name + "' has no return type and returns a Variant");
 				}
@@ -2848,6 +3052,7 @@ class Compiler {
 
 public:
 	Compiler *parent = nullptr, *outer = nullptr;
+	const std::map<std::string, std::unique_ptr<Compiler>> *project = nullptr;
 	std::vector<InnerDecl> inner_decls;
 	std::string extends_ref, chain;
 	int extends_line = 0;
@@ -2892,6 +3097,11 @@ public:
 			}
 			if (parent && (parent->find_member(m.name) || parent->find_fn(m.name))) {
 				throw Err{ m.line, "'" + m.name + "' already exists in a parent class" };
+			}
+		}
+		for (const Fn &f : fns) {
+			if (f.annotated && !f.abstract && f.declared != Ty::Void && f.name != "_init" && !body_returns(f.body)) {
+				throw Err{ f.line, "not all code paths return a value" };
 			}
 		}
 		for (const Compiler *c = this; c && !is_abstract; c = c->parent) {
@@ -3190,6 +3400,7 @@ class Project {
 				u = std::make_unique<Compiler>(tokenize(src), path, query, first_line(src) == "#pragma native unsafe");
 			}
 			c = u.get();
+			c->project = &units;
 			units[path] = std::move(u);
 			c->chain = where;
 			c->scan();
@@ -3207,7 +3418,6 @@ class Project {
 	}
 
 	std::set<std::string> script_bases(const std::string &path) const {
-		std::set<std::string> r;
 		std::string src;
 		if (!query.read(path, src)) {
 			return r;
