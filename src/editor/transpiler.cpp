@@ -417,7 +417,7 @@ class Compiler {
 	std::map<std::string, Const> consts;
 	TypeRef last_ref;
 	bool next_onready = false, next_abstract = false, next_class_abstract = false, is_abstract = false;
-	std::set<std::string> inners;
+	std::set<std::string> inners, declared_names;
 	mutable std::map<std::string, Const> outer_consts;
 	int next_usage = 4096;
 	std::vector<std::pair<int, int>> quiet;
@@ -681,7 +681,17 @@ class Compiler {
 		return v;
 	}
 
+	void check_assignable(const TypeRef &from, const TypeRef &to, int line) const {
+		bool arrays = !from.elem.empty() && !to.elem.empty() && from.elem != to.elem;
+		bool builtins = !from.builtin.empty() && !to.builtin.empty() && from.builtin != to.builtin;
+		bool natives = !from.cls.empty() && !to.cls.empty() && !classes.inherits(from.cls, to.cls) && !classes.inherits(to.cls, from.cls);
+		if (arrays || builtins || natives) {
+			throw Err{ line, "cannot assign a value of an unrelated type" };
+		}
+	}
+
 	std::string guarded(const E &e, Ty to, const TypeRef &r, int line) {
+		check_assignable(e.ref, r, line);
 		std::string v = conv(e, to, line);
 		if (e.literal && !r.elem.empty()) {
 			return "gn::typed_array(" + v + ", " + r.elem + ", " + L(line) + ")";
@@ -2262,12 +2272,18 @@ class Compiler {
 		}
 		if (eat("return")) {
 			if (tk().k == TK::NL) {
+				if (cur->declared != Ty::Var && cur->declared != Ty::Void) {
+					throw Err{ line, "function '" + cur->name + "' must return a value" };
+				}
 				p++;
 				out += cur->coroutine ? "co_return Variant();\n" : cur->ret == Ty::Void ? "return;\n" : "return {};\n";
 				return;
 			}
 			E e = expr();
 			nl();
+			if (cur->declared == Ty::Void && e.t != Ty::Void) {
+				throw Err{ line, "void function '" + cur->name + "' cannot return a value" };
+			}
 			std::string value = guarded(e, cur->declared, cur->ret_ref, line);
 			out += cur->coroutine ? "co_return Variant(" + value + ");\n" : cur->ret == Ty::Var ? "return Variant(" + value + ");\n" : "return " + value + ";\n";
 			return;
@@ -2356,6 +2372,12 @@ class Compiler {
 		skip_line();
 		if (tk().k == TK::Indent) {
 			skip_indented();
+		}
+	}
+
+	void declare_name(const std::string &n, int line) {
+		if (!declared_names.insert(n).second) {
+			throw Err{ line, "'" + n + "' is declared twice in this class" };
 		}
 	}
 
@@ -2476,6 +2498,7 @@ class Compiler {
 			} else if (eat("class")) {
 				InnerDecl d;
 				d.name = ident();
+				declare_name(d.name, line);
 				d.is_abstract = next_class_abstract;
 				next_class_abstract = false;
 				if (is("extends")) {
@@ -2504,6 +2527,7 @@ class Compiler {
 				inner_decls.push_back(std::move(d));
 			} else if (eat("signal")) {
 				signals.push_back(ident());
+				declare_name(signals.back(), line);
 				if (eat("(")) {
 					int depth = 1;
 					while (depth > 0) {
@@ -2574,6 +2598,7 @@ class Compiler {
 			} else if (eat("const")) {
 				Member m;
 				m.name = ident();
+				declare_name(m.name, line);
 				m.line = line;
 				if (eat(":")) {
 					m.t = parse_type();
@@ -2607,6 +2632,7 @@ class Compiler {
 			} else if (eat("var")) {
 				Member m;
 				m.name = ident();
+				declare_name(m.name, line);
 				m.line = line;
 				m.onready = next_onready;
 				m.is_static = stat;
@@ -2643,6 +2669,7 @@ class Compiler {
 			} else if (eat("func")) {
 				Fn f;
 				f.name = ident();
+				declare_name(f.name, line);
 				f.line = line;
 				f.abstract = next_abstract;
 				f.is_static = stat;
@@ -2759,8 +2786,13 @@ class Compiler {
 					f.ret_ref = m.ref;
 				}
 			}
-			if ((!m.getter.empty() && !find_fn(m.getter)) || (!m.setter.empty() && !find_fn(m.setter))) {
+			const Fn *getter = m.getter.empty() ? nullptr : find_fn(m.getter);
+			const Fn *setter = m.setter.empty() ? nullptr : find_fn(m.setter);
+			if ((!m.getter.empty() && !getter) || (!m.setter.empty() && !setter)) {
 				throw Err{ m.line, "property '" + m.name + "' names an unknown function" };
+			}
+			if ((getter && (getter->required() != 0 || getter->is_static != m.is_static)) || (setter && (setter->params.empty() || setter->required() > 1 || setter->is_static != m.is_static))) {
+				throw Err{ m.line, "property '" + m.name + "' has an accessor with the wrong signature" };
 			}
 		}
 	}
@@ -2853,13 +2885,37 @@ public:
 		const_block = out;
 	}
 
+	void validate() const {
+		for (const Member &m : members) {
+			if (m.onready && !classes.inherits(native(), "Node")) {
+				throw Err{ m.line, "@onready needs a class that extends Node" };
+			}
+			if (parent && (parent->find_member(m.name) || parent->find_fn(m.name))) {
+				throw Err{ m.line, "'" + m.name + "' already exists in a parent class" };
+			}
+		}
+		for (const Compiler *c = this; c && !is_abstract; c = c->parent) {
+			for (const Fn &f : c->fns) {
+				if (f.abstract && find_fn(f.name)->abstract) {
+					throw Err{ extends_line, "class must implement abstract function '" + f.name + "' or be marked @abstract" };
+				}
+			}
+		}
+	}
+
 	void collect_virtuals(std::set<std::string> &v) {
 		if (!parent) {
 			return;
 		}
 		for (Fn &f : fns) {
 			Fn *up = const_cast<Fn *>(parent->find_fn(f.name));
-			if (f.name == "_init" || !up || f.is_static || up->is_static) {
+			if (f.name == "_init" || !up) {
+				continue;
+			}
+			if (f.is_static != up->is_static) {
+				throw Err{ f.line, "override of '" + f.name + "' must keep its parent's static or instance kind" };
+			}
+			if (f.is_static) {
 				continue;
 			}
 			if (f.async_shape != up->async_shape) {
@@ -3150,62 +3206,6 @@ class Project {
 		return c;
 	}
 
-	template <typename F>
-	void guarded(Compiler *c, F f) {
-		try {
-			f();
-		} catch (const Err &e) {
-			throw ProjectError{ c->chain + ":" + std::to_string(e.line) + ": " + e.msg };
-		}
-	}
-
-public:
-	explicit Project(const ProjectQuery &q) :
-			query(q) {}
-
-	void run(const std::vector<std::string> &toggled, Output &r) {
-		for (const std::string &path : toggled) {
-			load(path, "");
-		}
-		std::set<std::string> virtuals;
-		for (Compiler *c : order) {
-			guarded(c, [&]() {
-				c->resolve();
-				c->collect_virtuals(virtuals);
-				c->collect_virtuals(virtuals);
-			});
-		}
-		for (Compiler *c : order) {
-			std::string h, cpp;
-			guarded(c, [&]() { c->emit(virtuals, h, cpp); });
-			r.files.push_back({ c->file_id() + ".gen.h", h });
-			r.files.push_back({ c->file_id() + ".cpp", cpp });
-			r.warnings.insert(r.warnings.end(), c->warning_set().begin(), c->warning_set().end());
-			if (!c->outer && std::find(toggled.begin(), toggled.end(), c->script_path()) == toggled.end()) {
-				r.implied.push_back(c->script_path());
-			}
-		}
-	}
-};
-
-} // namespace
-
-bool is_toggled(const std::string &source) {
-	std::string l = first_line(source);
-	return l == "#pragma native" || l == "#pragma native unsafe";
-}
-
-Output transpile_project(const std::vector<std::string> &toggled, const std::vector<std::string> &all, const ProjectQuery &query) {
-	Output r;
-	try {
-		Project(query).run(toggled, all, r);
-		r.ok = true;
-	} catch (const ProjectError &e) {
-		r.error = e.msg;
-	}
-	return r;
-}
-
 	std::set<std::string> script_bases(const std::string &path) const {
 		std::set<std::string> r;
 		std::string src;
@@ -3251,5 +3251,62 @@ Output transpile_project(const std::vector<std::string> &toggled, const std::vec
 		}
 	}
 
-} // namespace gn
+	template <typename F>
+	void guarded(Compiler *c, F f) {
+		try {
+			f();
+		} catch (const Err &e) {
+			throw ProjectError{ c->chain + ":" + std::to_string(e.line) + ": " + e.msg };
+		}
+	}
+
+public:
+	explicit Project(const ProjectQuery &q) :
+			query(q) {}
+
+	void run(const std::vector<std::string> &toggled, const std::vector<std::string> &all, Output &r) {
+		for (const std::string &path : toggled) {
+			load(path, "");
+		}
 		load_descendants(all);
+		std::set<std::string> virtuals;
+		for (Compiler *c : order) {
+			guarded(c, [&]() {
+				c->resolve();
+				c->validate();
+				c->collect_virtuals(virtuals);
+				c->collect_virtuals(virtuals);
+			});
+		}
+		for (Compiler *c : order) {
+			std::string h, cpp;
+			guarded(c, [&]() { c->emit(virtuals, h, cpp); });
+			r.files.push_back({ c->file_id() + ".gen.h", h });
+			r.files.push_back({ c->file_id() + ".cpp", cpp });
+			r.warnings.insert(r.warnings.end(), c->warning_set().begin(), c->warning_set().end());
+			if (!c->outer && std::find(toggled.begin(), toggled.end(), c->script_path()) == toggled.end()) {
+				r.implied.push_back(c->script_path());
+			}
+		}
+	}
+};
+
+} // namespace
+
+bool is_toggled(const std::string &source) {
+	std::string l = first_line(source);
+	return l == "#pragma native" || l == "#pragma native unsafe";
+}
+
+Output transpile_project(const std::vector<std::string> &toggled, const std::vector<std::string> &all, const ProjectQuery &query) {
+	Output r;
+	try {
+		Project(query).run(toggled, all, r);
+		r.ok = true;
+	} catch (const ProjectError &e) {
+		r.error = e.msg;
+	}
+	return r;
+}
+
+} // namespace gn

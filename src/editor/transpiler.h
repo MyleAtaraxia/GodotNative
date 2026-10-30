@@ -32,6 +32,7 @@ class ClassQuery {
 public:
 	virtual ~ClassQuery() {}
 	virtual bool class_exists(const std::string &name) const = 0;
+	virtual bool inherits(const std::string &cls, const std::string &base) const = 0;
 	virtual NativeMember method(const std::string &cls, const std::string &name) const = 0;
 	virtual NativeMember property(const std::string &cls, const std::string &name) const = 0;
 	virtual bool int_constant(const std::string &cls, const std::string &name, int64_t &value) const = 0;

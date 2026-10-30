@@ -161,6 +161,9 @@ public:
 	bool class_exists(const std::string &name) const override {
 		return ClassDBSingleton::get_singleton()->class_exists(name.c_str());
 	}
+	bool inherits(const std::string &cls, const std::string &base) const override {
+		return ClassDBSingleton::get_singleton()->is_parent_class(cls.c_str(), base.c_str());
+	}
 	gn::NativeMember method(const std::string &cls, const std::string &name) const override {
 		gn::NativeMember r;
 		TypedArray<Dictionary> list = ClassDBSingleton::get_singleton()->class_get_method_list(cls.c_str());
@@ -471,10 +474,10 @@ bool compile_native(const String &target, bool show_progress = false) {
 	LiveClasses classes;
 	std::vector<std::string> toggled, all;
 	for (const String &path : scripts) {
+		all.push_back(std_str(path));
 		if (gn::is_toggled(std_str(FileAccess::get_file_as_string(path)))) {
 			toggled.push_back(std_str(path));
 		}
-		all.push_back(std_str(path));
 	}
 	gn::Output r = gn::transpile_project(toggled, all, classes);
 	for (const std::string &w : r.warnings) {
