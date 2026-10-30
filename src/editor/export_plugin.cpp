@@ -469,13 +469,14 @@ bool compile_native(const String &target, bool show_progress = false) {
 	PackedStringArray scripts;
 	find_scripts("res://", scripts);
 	LiveClasses classes;
-	std::vector<std::string> toggled;
+	std::vector<std::string> toggled, all;
 	for (const String &path : scripts) {
 		if (gn::is_toggled(std_str(FileAccess::get_file_as_string(path)))) {
 			toggled.push_back(std_str(path));
 		}
+		all.push_back(std_str(path));
 	}
-	gn::Output r = gn::transpile_project(toggled, classes);
+	gn::Output r = gn::transpile_project(toggled, all, classes);
 	for (const std::string &w : r.warnings) {
 		UtilityFunctions::print("[GodotNative] warning: ", w.c_str());
 	}
@@ -484,7 +485,7 @@ bool compile_native(const String &target, bool show_progress = false) {
 		return false;
 	}
 	for (const std::string &p : r.implied) {
-		UtilityFunctions::print("[GodotNative] also compiled as a parent script: ", p.c_str());
+		UtilityFunctions::print("[GodotNative] also compiled through inheritance: ", p.c_str());
 	}
 	// shortcut: only generated code is compared, so changing the addon's own runtime needs the old library deleted. Upgrade by hashing the runtime sources if that ever bites users.
 	int sources = 0;

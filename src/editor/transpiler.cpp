@@ -3195,10 +3195,10 @@ bool is_toggled(const std::string &source) {
 	return l == "#pragma native" || l == "#pragma native unsafe";
 }
 
-Output transpile_project(const std::vector<std::string> &toggled, const ProjectQuery &query) {
+Output transpile_project(const std::vector<std::string> &toggled, const std::vector<std::string> &all, const ProjectQuery &query) {
 	Output r;
 	try {
-		Project(query).run(toggled, r);
+		Project(query).run(toggled, all, r);
 		r.ok = true;
 	} catch (const ProjectError &e) {
 		r.error = e.msg;
@@ -3206,4 +3206,50 @@ Output transpile_project(const std::vector<std::string> &toggled, const ProjectQ
 	return r;
 }
 
+	std::set<std::string> script_bases(const std::string &path) const {
+		std::set<std::string> r;
+		std::string src;
+		if (!query.read(path, src)) {
+			return r;
+		}
+		std::vector<Tok> t;
+		try {
+			t = tokenize(src);
+		} catch (const Err &) {
+			return r;
+		}
+		for (size_t q = 0; q + 1 < t.size(); q++) {
+			if (t[q].k == TK::Id && t[q].s == "extends") {
+				std::string base = t[q + 1].k == TK::Str ? query.absolute(path, t[q + 1].s) : query.global_class_path(t[q + 1].s);
+				if (!base.empty()) {
+					r.insert(base);
+				}
+			}
+		}
+		return r;
+	}
+
+	void load_descendants(const std::vector<std::string> &all) {
+		std::map<std::string, std::set<std::string>> waiting;
+		for (const std::string &path : all) {
+			if (!units.count(path)) {
+				waiting[path] = script_bases(path);
+			}
+		}
+		for (bool grew = true; grew;) {
+			grew = false;
+			for (auto it = waiting.begin(); it != waiting.end();) {
+				auto hit = std::find_if(it->second.begin(), it->second.end(), [&](const std::string &b) { return units.count(b) > 0; });
+				if (hit == it->second.end()) {
+					++it;
+					continue;
+				}
+				load(it->first, "child of native script " + *hit);
+				it = waiting.erase(it);
+				grew = true;
+			}
+		}
+	}
+
 } // namespace gn
+		load_descendants(all);

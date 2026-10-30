@@ -708,6 +708,9 @@ Variant singleton(const StringName &name) {
 }
 
 Variant load(const String &path) {
+	if (const Class *c = find_class(path)) {
+		return NativeScript::of(c);
+	}
 	int sep = path.find("::");
 	if (sep < 0) {
 		return ResourceLoader::get_singleton()->call(GN_SN("load"), path);
@@ -772,7 +775,11 @@ Ref<NativeScript> NativeScript::of(const gn::Class *c) {
 		live_scripts().insert(path, s);
 		s->setup(c);
 	}
-	return live_scripts()[path];
+	Ref<NativeScript> s = live_scripts()[path];
+	if (s->get_path() != path) {
+		s->take_over_path(path);
+	}
+	return s;
 }
 
 void NativeScript::release_all() {
