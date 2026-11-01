@@ -3419,9 +3419,11 @@ class Project {
 
 	std::set<std::string> script_bases(const std::string &path) const {
 		std::string src;
-		if (!query.read(path, src)) {
-			return r;
-		}
+		return query.read(path, src) ? source_bases(path, src) : std::set<std::string>();
+	}
+
+	std::set<std::string> source_bases(const std::string &path, const std::string &src) const {
+		std::set<std::string> r;
 		std::vector<Tok> t;
 		try {
 			t = tokenize(src);
@@ -3474,11 +3476,18 @@ public:
 	explicit Project(const ProjectQuery &q) :
 			query(q) {}
 
-	void run(const std::vector<std::string> &toggled, const std::vector<std::string> &all, Output &r) {
+	void run(const std::vector<std::string> &toggled, const std::vector<std::string> &all, const std::vector<std::pair<std::string, std::string>> &embedded, Output &r) {
 		for (const std::string &path : toggled) {
 			load(path, "");
 		}
 		load_descendants(all);
+		for (const auto &e : embedded) {
+			for (const std::string &base : source_bases(e.first, e.second)) {
+				if (units.count(base)) {
+					throw ProjectError{ e.first + ": built-in script extends native script " + base + ", move it to its own .gd file" };
+				}
+			}
+		}
 		std::set<std::string> virtuals;
 		for (Compiler *c : order) {
 			guarded(c, [&]() {
@@ -3508,10 +3517,10 @@ bool is_toggled(const std::string &source) {
 	return l == "#pragma native" || l == "#pragma native unsafe";
 }
 
-Output transpile_project(const std::vector<std::string> &toggled, const std::vector<std::string> &all, const ProjectQuery &query) {
+Output transpile_project(const std::vector<std::string> &toggled, const std::vector<std::string> &all, const std::vector<std::pair<std::string, std::string>> &embedded, const ProjectQuery &query) {
 	Output r;
 	try {
-		Project(query).run(toggled, all, r);
+		Project(query).run(toggled, all, embedded, r);
 		r.ok = true;
 	} catch (const ProjectError &e) {
 		r.error = e.msg;

@@ -303,7 +303,7 @@ public:
 	}
 };
 
-void find_scripts(const String &dir, PackedStringArray &out) {
+void find_scripts(const String &dir, PackedStringArray &out, PackedStringArray &scenes) {
 	Ref<DirAccess> d = DirAccess::open(dir);
 	if (d.is_null()) {
 		return;
@@ -311,12 +311,32 @@ void find_scripts(const String &dir, PackedStringArray &out) {
 	for (const String &f : d->get_files()) {
 		if (f.get_extension() == "gd") {
 			out.push_back(dir.path_join(f));
+		} else if (f.get_extension() == "tscn") {
+			scenes.push_back(dir.path_join(f));
 		}
 	}
 	for (const String &sub : d->get_directories()) {
-		if (!sub.begins_with(".") && sub != "addons") {
-			find_scripts(dir.path_join(sub), out);
+		if (!sub.begins_with(".") && dir.path_join(sub) != "res://addons/godot_native") {
+			find_scripts(dir.path_join(sub), out, scenes);
 		}
+	}
+}
+
+// shortcut: only text scenes are read, so a built-in script in a binary .scn goes unchecked. Upgrade if projects ship binary scenes with built-in scripts.
+void embedded_sources(const String &scene, std::vector<std::pair<std::string, std::string>> &out) {
+	const std::string text = std_str(FileAccess::get_file_as_string(scene));
+	const std::string key = "script/source = \"";
+	for (size_t at = text.find(key); at != std::string::npos; at = text.find(key, at + 1)) {
+		std::string source;
+		for (size_t q = at + key.size(); q < text.size() && text[q] != '"'; q++) {
+			if (text[q] == '\\' && q + 1 < text.size()) {
+				q++;
+				source += text[q] == 'n' ? '\n' : text[q] == 't' ? '\t' : text[q];
+			} else {
+				source += text[q];
+			}
+		}
+		out.push_back({ std_str(scene), source });
 	}
 }
 
@@ -470,7 +490,12 @@ bool compile_native(const String &target, bool show_progress = false) {
 	ignore.unref();
 
 	PackedStringArray scripts;
-	find_scripts("res://", scripts);
+	PackedStringArray scenes;
+	find_scripts("res://", scripts, scenes);
+	std::vector<std::pair<std::string, std::string>> embedded;
+	for (const String &scene : scenes) {
+		embedded_sources(scene, embedded);
+	}
 	LiveClasses classes;
 	std::vector<std::string> toggled, all;
 	for (const String &path : scripts) {
@@ -479,7 +504,7 @@ bool compile_native(const String &target, bool show_progress = false) {
 			toggled.push_back(std_str(path));
 		}
 	}
-	gn::Output r = gn::transpile_project(toggled, all, classes);
+	gn::Output r = gn::transpile_project(toggled, all, embedded, classes);
 	for (const std::string &w : r.warnings) {
 		UtilityFunctions::print("[GodotNative] warning: ", w.c_str());
 	}

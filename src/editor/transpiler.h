@@ -61,6 +61,6 @@ struct Output {
 };
 
 bool is_toggled(const std::string &source);
-Output transpile_project(const std::vector<std::string> &toggled, const std::vector<std::string> &all, const ProjectQuery &query);
+Output transpile_project(const std::vector<std::string> &toggled, const std::vector<std::string> &all, const std::vector<std::pair<std::string, std::string>> &embedded, const ProjectQuery &query);
 
 } // namespace gn
