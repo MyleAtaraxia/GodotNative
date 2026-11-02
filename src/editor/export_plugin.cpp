@@ -303,6 +303,33 @@ public:
 	}
 };
 
+int int_setting(const char *name, int fallback) {
+	return int(ProjectSettings::get_singleton()->get_setting(String("godot_native/") + name, fallback));
+}
+
+void add_setting(const String &name, const Variant &value, PropertyHint hint = PROPERTY_HINT_NONE, const String &hint_string = "") {
+	ProjectSettings *settings = ProjectSettings::get_singleton();
+	String key = "godot_native/" + name;
+	if (!settings->has_setting(key)) {
+		settings->set_setting(key, value);
+	}
+	settings->set_initial_value(key, value);
+	settings->set_as_basic(key, true);
+	Dictionary info;
+	info["name"] = key;
+	info["type"] = value.get_type();
+	info["hint"] = hint;
+	info["hint_string"] = hint_string;
+	settings->add_property_info(info);
+}
+
+void register_settings() {
+	add_setting("inheritance/children_of_native", gn::Options::CHILDREN_COMPILE, PROPERTY_HINT_ENUM, "Compile,Fail Export,Leave Interpreted");
+	add_setting("errors/project_scripts", gn::Options::ERRORS_FAIL, PROPERTY_HINT_ENUM, "Fail Export,Warn and Run Interpreted");
+	add_setting("errors/addon_scripts", gn::Options::ERRORS_FAIL, PROPERTY_HINT_ENUM, "Fail Export,Warn and Run Interpreted,Don't Scan Addons");
+	add_setting("warnings/untyped_code", gn::Options::UNTYPED_WARN, PROPERTY_HINT_ENUM, "Ignore,Warn,Error");
+}
+
 void find_scripts(const String &dir, PackedStringArray &out, PackedStringArray &scenes) {
 	Ref<DirAccess> d = DirAccess::open(dir);
 	if (d.is_null()) {
@@ -316,7 +343,9 @@ void find_scripts(const String &dir, PackedStringArray &out, PackedStringArray &
 		}
 	}
 	for (const String &sub : d->get_directories()) {
-		if (!sub.begins_with(".") && dir.path_join(sub) != "res://addons/godot_native") {
+		String path = dir.path_join(sub);
+		bool skip_addons = path == "res://addons" && int_setting("errors/addon_scripts", 0) == gn::Options::ERRORS_SKIP_ADDONS;
+		if (!sub.begins_with(".") && path != "res://addons/godot_native" && !skip_addons) {
 			find_scripts(dir.path_join(sub), out, scenes);
 		}
 	}
@@ -504,7 +533,15 @@ bool compile_native(const String &target, bool show_progress = false) {
 			toggled.push_back(std_str(path));
 		}
 	}
-	gn::Output r = gn::transpile_project(toggled, all, embedded, classes);
+	gn::Options options;
+	options.children = int_setting("inheritance/children_of_native", options.children);
+	options.project_errors = int_setting("errors/project_scripts", options.project_errors);
+	options.addon_errors = int_setting("errors/addon_scripts", options.addon_errors);
+	options.untyped = int_setting("warnings/untyped_code", options.untyped);
+	gn::Output r = gn::transpile_project(toggled, all, embedded, options, classes);
+	for (const std::string &f : r.fallback) {
+		UtilityFunctions::push_warning("[GodotNative] running interpreted: ", f.c_str());
+	}
 	for (const std::string &w : r.warnings) {
 		UtilityFunctions::print("[GodotNative] warning: ", w.c_str());
 	}
@@ -566,6 +603,7 @@ protected:
 public:
 	bool _build() override { return compile_native("template_debug", true); }
 	void _enter_tree() override {
+		register_settings();
 		exporter.instantiate();
 		add_export_plugin(exporter);
 	}

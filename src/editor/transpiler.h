@@ -57,10 +57,21 @@ struct Output {
 	std::vector<std::pair<std::string, std::string>> files;
 	std::vector<std::string> implied;
 	std::vector<std::string> warnings;
+	std::vector<std::string> fallback;
 	std::string error;
 };
 
+struct Options {
+	enum Children { CHILDREN_COMPILE, CHILDREN_FAIL, CHILDREN_INTERPRET };
+	enum Errors { ERRORS_FAIL, ERRORS_INTERPRET, ERRORS_SKIP_ADDONS };
+	enum Untyped { UNTYPED_IGNORE, UNTYPED_WARN, UNTYPED_ERROR };
+	int children = CHILDREN_COMPILE;
+	int project_errors = ERRORS_FAIL;
+	int addon_errors = ERRORS_FAIL;
+	int untyped = UNTYPED_WARN;
+};
+
 bool is_toggled(const std::string &source);
-Output transpile_project(const std::vector<std::string> &toggled, const std::vector<std::string> &all, const std::vector<std::pair<std::string, std::string>> &embedded, const ProjectQuery &query);
+Output transpile_project(const std::vector<std::string> &toggled, const std::vector<std::string> &all, const std::vector<std::pair<std::string, std::string>> &embedded, const Options &options, const ProjectQuery &query);
 
 } // namespace gn

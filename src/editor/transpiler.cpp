@@ -468,13 +468,28 @@ class Compiler {
 	}
 	std::string L(int line) const { return "GN_L(" + std::to_string(line) + ")"; }
 	std::string temp() { return "t_" + std::to_string(tmp++); }
-	void warn(int line, const std::string &m) {
+	bool quiet_at(int line) const {
 		for (const std::pair<int, int> &q : quiet) {
 			if (line >= q.first && line <= q.second) {
-				return;
+				return true;
 			}
 		}
-		warnings.insert(path + ":" + std::to_string(line) + ": " + m);
+		return false;
+	}
+
+	void warn(int line, const std::string &m) {
+		if (!quiet_at(line)) {
+			warnings.insert(path + ":" + std::to_string(line) + ": " + m);
+		}
+	}
+
+	void untyped(int line, const std::string &m) {
+		if (untyped_mode == Options::UNTYPED_ERROR && !quiet_at(line)) {
+			throw Err{ line, m };
+		}
+		if (untyped_mode == Options::UNTYPED_WARN) {
+			warn(line, m);
+		}
 	}
 
 	size_t past_annotation(size_t q, bool *names_untyped = nullptr) const {
@@ -2043,7 +2058,7 @@ class Compiler {
 			const Local *loc = find_local(l.local);
 			if (loc->weak && r.t != loc->t) {
 				demoted.insert(loc->key);
-				warn(line, "'" + l.local + "' changes type, so it stays a Variant");
+				untyped(line, "'" + l.local + "' changes type, so it stays a Variant");
 				throw Retry{};
 			}
 		}
@@ -2104,7 +2119,7 @@ class Compiler {
 			}
 		} else if (!eat("=")) {
 			nl();
-			warn(line, "'" + n + "' has no type and stays a Variant");
+			untyped(line, "'" + n + "' has no type and stays a Variant");
 			declare(n, Ty::Var, false, "");
 			out += "Variant l_" + n + ";\n";
 			return;
@@ -2119,7 +2134,7 @@ class Compiler {
 		} else if (weak) {
 			ty = demoted.count(key) ? Ty::Var : e.t;
 			if (ty == Ty::Var) {
-				warn(line, "could not infer a type for '" + n + "', so it stays a Variant");
+				untyped(line, "could not infer a type for '" + n + "', so it stays a Variant");
 			}
 		}
 		std::string v = guarded(e, ty, ref, line);
@@ -2866,7 +2881,7 @@ class Compiler {
 					property_block(m);
 				}
 				if (!m.declared) {
-					warn(line, "member '" + m.name + "' has no type and stays a Variant");
+					untyped(line, "member '" + m.name + "' has no type and stays a Variant");
 				}
 				members.push_back(m);
 			} else if (eat("func")) {
@@ -2903,7 +2918,7 @@ class Compiler {
 						}
 					}
 					if (!typed) {
-						warn(line, "parameter '" + a.name + "' has no type and stays a Variant");
+						untyped(line, "parameter '" + a.name + "' has no type and stays a Variant");
 					}
 					f.params.push_back(a);
 					if (!eat(",")) {
@@ -2916,7 +2931,7 @@ class Compiler {
 					f.ret_ref = last_ref;
 					f.annotated = true;
 				} else {
-					warn(line, "function '" + f.name + "' has no return type and returns a Variant");
+					untyped(line, "function '" + f.name + "' has no return type and returns a Variant");
 				}
 				if (f.abstract) {
 					nl();
@@ -3052,6 +3067,7 @@ class Compiler {
 
 public:
 	Compiler *parent = nullptr, *outer = nullptr;
+	int untyped_mode = Options::UNTYPED_WARN;
 	const std::map<std::string, std::unique_ptr<Compiler>> *project = nullptr;
 	std::vector<InnerDecl> inner_decls;
 	std::string extends_ref, chain;
@@ -3356,10 +3372,17 @@ public:
 
 struct ProjectError {
 	std::string msg;
+	std::string file;
 };
+
+std::string file_of(const std::string &path) {
+	return path.substr(0, path.find("::"));
+}
 
 class Project {
 	const ProjectQuery &query;
+	const Options &options;
+	const std::set<std::string> &excluded;
 	std::map<std::string, std::unique_ptr<Compiler>> units;
 	std::vector<Compiler *> order;
 
@@ -3368,7 +3391,7 @@ class Project {
 		std::string where = chain.empty() ? path : chain + " -> " + path;
 		if (found != units.end()) {
 			if (std::find(order.begin(), order.end(), found->second.get()) == order.end()) {
-				throw ProjectError{ where + ": inheritance cycle" };
+				throw ProjectError{ where + ": inheritance cycle", file_of(path) };
 			}
 			return found->second.get();
 		}
@@ -3385,7 +3408,7 @@ class Project {
 				std::string name = path.substr(sep + 2);
 				auto d = std::find_if(o->inner_decls.begin(), o->inner_decls.end(), [&](const InnerDecl &i) { return i.name == name; });
 				if (d == o->inner_decls.end()) {
-					throw ProjectError{ where + ": unknown inner class" };
+					throw ProjectError{ where + ": unknown inner class", file_of(path) };
 				}
 				u = std::make_unique<Compiler>(d->tokens, path, query, o->unsafe_mode());
 				u->outer = o;
@@ -3395,19 +3418,23 @@ class Project {
 			} else {
 				std::string src;
 				if (!query.read(path, src)) {
-					throw ProjectError{ where + ": could not read the file" };
+					throw ProjectError{ where + ": could not read the file", file_of(path) };
 				}
 				u = std::make_unique<Compiler>(tokenize(src), path, query, first_line(src) == "#pragma native unsafe");
 			}
 			c = u.get();
 			c->project = &units;
+			c->untyped_mode = options.untyped;
 			units[path] = std::move(u);
 			c->chain = where;
 			c->scan();
 		} catch (const Err &e) {
-			throw ProjectError{ where + ":" + std::to_string(e.line) + ": " + e.msg };
+			throw ProjectError{ where + ":" + std::to_string(e.line) + ": " + e.msg, file_of(path) };
 		}
 		if (!c->extends_ref.empty()) {
+			if (excluded.count(file_of(c->extends_ref))) {
+				throw ProjectError{ where + ": parent " + file_of(c->extends_ref) + " runs interpreted, so this script must too", file_of(path) };
+			}
 			c->parent = load(c->extends_ref, where);
 		}
 		order.push_back(c);
@@ -3441,10 +3468,10 @@ class Project {
 		return r;
 	}
 
-	void load_descendants(const std::vector<std::string> &all) {
+	void load_descendants(const std::vector<std::string> &all, Output &r) {
 		std::map<std::string, std::set<std::string>> waiting;
 		for (const std::string &path : all) {
-			if (!units.count(path)) {
+			if (!units.count(path) && !excluded.count(path)) {
 				waiting[path] = script_bases(path);
 			}
 		}
@@ -3454,6 +3481,14 @@ class Project {
 				auto hit = std::find_if(it->second.begin(), it->second.end(), [&](const std::string &b) { return units.count(b) > 0; });
 				if (hit == it->second.end()) {
 					++it;
+					continue;
+				}
+				if (options.children == Options::CHILDREN_FAIL) {
+					throw ProjectError{ it->first + ": extends native script " + *hit + ", add #pragma native or change children_of_native", "" };
+				}
+				if (options.children == Options::CHILDREN_INTERPRET) {
+					r.warnings.push_back(it->first + ": left interpreted, so it runs on a GDScript copy of " + *hit);
+					it = waiting.erase(it);
 					continue;
 				}
 				load(it->first, "child of native script " + *hit);
@@ -3468,23 +3503,27 @@ class Project {
 		try {
 			f();
 		} catch (const Err &e) {
-			throw ProjectError{ c->chain + ":" + std::to_string(e.line) + ": " + e.msg };
+			throw ProjectError{ c->chain + ":" + std::to_string(e.line) + ": " + e.msg, file_of(c->script_path()) };
 		}
 	}
 
 public:
-	explicit Project(const ProjectQuery &q) :
-			query(q) {}
+	Project(const ProjectQuery &q, const Options &o, const std::set<std::string> &e) :
+			query(q), options(o), excluded(e) {}
 
 	void run(const std::vector<std::string> &toggled, const std::vector<std::string> &all, const std::vector<std::pair<std::string, std::string>> &embedded, Output &r) {
 		for (const std::string &path : toggled) {
-			load(path, "");
+			if (!excluded.count(path)) {
+				load(path, "");
+			}
 		}
-		load_descendants(all);
+		load_descendants(all, r);
 		for (const auto &e : embedded) {
 			for (const std::string &base : source_bases(e.first, e.second)) {
-				if (units.count(base)) {
-					throw ProjectError{ e.first + ": built-in script extends native script " + base + ", move it to its own .gd file" };
+				if (units.count(base) && options.children == Options::CHILDREN_INTERPRET) {
+					r.warnings.push_back(e.first + ": built-in script left interpreted, so it runs on a GDScript copy of " + base);
+				} else if (units.count(base)) {
+					throw ProjectError{ e.first + ": built-in script extends native script " + base + ", move it to its own .gd file", "" };
 				}
 			}
 		}
@@ -3517,15 +3556,26 @@ bool is_toggled(const std::string &source) {
 	return l == "#pragma native" || l == "#pragma native unsafe";
 }
 
-Output transpile_project(const std::vector<std::string> &toggled, const std::vector<std::string> &all, const std::vector<std::pair<std::string, std::string>> &embedded, const ProjectQuery &query) {
-	Output r;
-	try {
-		Project(query).run(toggled, all, embedded, r);
-		r.ok = true;
-	} catch (const ProjectError &e) {
-		r.error = e.msg;
+Output transpile_project(const std::vector<std::string> &toggled, const std::vector<std::string> &all, const std::vector<std::pair<std::string, std::string>> &embedded, const Options &options, const ProjectQuery &query) {
+	std::set<std::string> excluded;
+	std::vector<std::string> fallback;
+	for (;;) {
+		Output r;
+		r.fallback = fallback;
+		try {
+			Project(query, options, excluded).run(toggled, all, embedded, r);
+			r.ok = true;
+			return r;
+		} catch (const ProjectError &e) {
+			int policy = e.file.rfind("res://addons/", 0) == 0 ? options.addon_errors : options.project_errors;
+			if (e.file.empty() || policy == Options::ERRORS_FAIL || excluded.count(e.file)) {
+				r.error = e.msg;
+				return r;
+			}
+			excluded.insert(e.file);
+			fallback.push_back(e.msg);
+		}
 	}
-	return r;
 }
 
 } // namespace gn
