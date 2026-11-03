@@ -307,6 +307,11 @@ int int_setting(const char *name, int fallback) {
 	return int(ProjectSettings::get_singleton()->get_setting(String("godot_native/") + name, fallback));
 }
 
+String scons_path() {
+	String path = ProjectSettings::get_singleton()->get_setting("godot_native/build/scons_path", "scons");
+	return path.is_empty() ? "scons" : path;
+}
+
 void add_setting(const String &name, const Variant &value, PropertyHint hint = PROPERTY_HINT_NONE, const String &hint_string = "") {
 	ProjectSettings *settings = ProjectSettings::get_singleton();
 	String key = "godot_native/" + name;
@@ -328,6 +333,8 @@ void register_settings() {
 	add_setting("errors/project_scripts", gn::Options::ERRORS_FAIL, PROPERTY_HINT_ENUM, "Fail Export,Warn and Run Interpreted");
 	add_setting("errors/addon_scripts", gn::Options::ERRORS_FAIL, PROPERTY_HINT_ENUM, "Fail Export,Warn and Run Interpreted,Don't Scan Addons");
 	add_setting("warnings/untyped_code", gn::Options::UNTYPED_WARN, PROPERTY_HINT_ENUM, "Ignore,Warn,Error");
+	add_setting("build/jobs", 8, PROPERTY_HINT_RANGE, "0,256,1");
+	add_setting("build/scons_path", "scons");
 }
 
 void find_scripts(const String &dir, PackedStringArray &out, PackedStringArray &scenes) {
@@ -470,7 +477,7 @@ String complete_lines(const Ref<FileAccess> &pipe, PackedByteArray &pending, boo
 
 int run_with_popup(const PackedStringArray &args, const String &root, const String &target, int sources, Array &output) {
 	OS::get_singleton()->set_environment("PYTHONUNBUFFERED", "1");
-	Dictionary process = OS::get_singleton()->execute_with_pipe("scons", args, false);
+	Dictionary process = OS::get_singleton()->execute_with_pipe(scons_path(), args, false);
 	OS::get_singleton()->unset_environment("PYTHONUNBUFFERED");
 	if (process.is_empty()) {
 		return -1;
@@ -560,11 +567,13 @@ bool compile_native(const String &target, bool show_progress = false) {
 	String project_dir = ProjectSettings::get_singleton()->globalize_path("res://").trim_suffix("/");
 	String root = project_dir.get_base_dir();
 	Array output;
-	PackedStringArray args = { "-C", root, "target=" + target, "project=" + project_dir.get_file(), "-j8" };
+	int jobs = int_setting("build/jobs", 8);
+	jobs = jobs > 0 ? jobs : OS::get_singleton()->get_processor_count();
+	PackedStringArray args = { "-C", root, "target=" + target, "project=" + project_dir.get_file(), "-j" + String::num_int64(jobs) };
 	bool popup = show_progress && DisplayServer::get_singleton()->get_name() != "headless";
-	int code = popup ? run_with_popup(args, root, target, sources, output) : OS::get_singleton()->execute("scons", args, output, true);
+	int code = popup ? run_with_popup(args, root, target, sources, output) : OS::get_singleton()->execute(scons_path(), args, output, true);
 	if (code != 0) {
-		UtilityFunctions::push_error("[GodotNative] scons failed:\n", output);
+		UtilityFunctions::push_error("[GodotNative] scons failed, ran ", scons_path(), ":\n", output);
 		return false;
 	}
 	UtilityFunctions::print("[GodotNative] compiled ", int(r.files.size() / 2), " file(s) for ", target);
