@@ -4,6 +4,7 @@
 #include <godot_cpp/classes/control.hpp>
 #include <godot_cpp/classes/dir_access.hpp>
 #include <godot_cpp/classes/display_server.hpp>
+#include <godot_cpp/classes/editor_export_platform.hpp>
 #include <godot_cpp/classes/editor_export_plugin.hpp>
 #include <godot_cpp/classes/editor_interface.hpp>
 #include <godot_cpp/classes/editor_plugin.hpp>
@@ -595,10 +596,13 @@ public:
 	String _get_name() const override { return "GodotNative"; }
 
 	void _export_begin(const PackedStringArray &, bool is_debug, const String &, uint32_t) override {
-		// shortcut: failures only print an error and remove the library, because _export_begin cannot abort. Upgrade once a real export hook exists for this.
+		// shortcut: a failure reports an export error and ships no library, but the export still writes its files because _export_begin cannot abort. Upgrade once a real export hook exists for this.
 		String target = is_debug ? "template_debug" : "template_release";
 		DirAccess::remove_absolute(library_path(target));
-		compile_native(target);
+		Ref<EditorExportPlatform> platform = get_export_platform();
+		if (!compile_native(target) && platform.is_valid()) {
+			platform->add_message(EditorExportPlatform::EXPORT_MESSAGE_ERROR, "GodotNative", "Native compile failed, so this export has no native library. See the Output panel.");
+		}
 	}
 };
 
