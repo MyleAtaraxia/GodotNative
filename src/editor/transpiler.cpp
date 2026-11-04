@@ -383,6 +383,8 @@ struct OmpVars {
 };
 
 struct OmpState {
+	std::string barrier;
+	std::string team_failed;
 	bool region = false, blocked = false, work = false, simd = false, tracking = false;
 	int loops = 0;
 };
@@ -2429,10 +2431,12 @@ class Compiler {
 			throw Err{ line, "#pragma omp " + d.kind + " cannot be in a function that uses await" };
 		}
 		bool team = d.kind == "parallel";
-		std::string failed = temp();
-		out += "{\n" + std::string(team ? "std::atomic<bool> " + failed + "{ false }" : "bool " + failed + " = false") + ";\n";
+		bool wait = d.kind == "single" && !d.nowait && !omp.barrier.empty();
+		std::string after = wait ? omp_wait() : "";
+		std::string failed = temp(), barrier = temp();
+		out += "{\n" + std::string(team ? "std::atomic<bool> " + failed + "{ false };\ngn::TeamBarrier " + barrier : "bool " + failed + " = false") + ";\n";
 		OmpVars v = omp_vars(d, line);
-		std::string clauses = team ? omp_team(d, line) : d.nowait ? " nowait" : d.name.empty() ? "" : "(gn_" + d.name + ")";
+		std::string clauses = team ? omp_team(d, line) : d.nowait || wait ? " nowait" : d.name.empty() ? "" : "(gn_" + d.name + ")";
 		size_t detach_at = out.size();
 		out += "#pragma omp " + d.kind + clauses + "\n{\n" + v.opens + "try {\n";
 		OmpState saved = omp;
@@ -2442,8 +2446,12 @@ class Compiler {
 		omp.blocked = true;
 		omp.work = !team;
 		omp.loops = 0;
+		if (team) {
+			omp.barrier = barrier;
+			omp.team_failed = failed;
+		}
 		omp_block(d.kind, line);
-		out += "} catch (const gn::Abort &) { " + failed + " = true; }\n" + v.closes + "}\nif (" + failed + ") { throw gn::Abort{}; }\n}\n";
+		out += "} catch (const gn::Abort &) { " + failed + " = true; }\n" + v.closes + "}\nif (" + failed + ") { throw gn::Abort{}; }\n" + after + "}\n";
 		omp_detach_writes(outermost, detach_at, saved_writes);
 		omp = saved;
 	}
@@ -2522,17 +2530,26 @@ class Compiler {
 		size_t detach_at = out.size();
 		std::set<std::string> saved_writes;
 		bool outermost = team && omp_track_writes(saved_writes);
+		bool wait = !team && !d.nowait && !omp.barrier.empty();
+		std::string after = wait ? omp_wait() : "";
+		if (team) {
+			omp.barrier.clear();
+		}
 		out += team ? "#pragma omp parallel" + clauses + "\n{\n" : "{\n";
-		out += v.opens + "#pragma omp for schedule(" + d.schedule + ")" + (d.nowait ? " nowait" : "") + "\n" + loop;
+		out += v.opens + "#pragma omp for schedule(" + d.schedule + ")" + (d.nowait || wait ? " nowait" : "") + "\n" + loop;
 		out += "if (" + failed + ".load(std::memory_order_relaxed)) { continue; }\ntry {\n";
 		scopes.emplace_back();
 		declare(n, Ty::Int, false, "");
 		out += "int64_t l_" + n + " = " + start + " + " + k + " * " + stride + ";\n";
 		block();
 		scopes.pop_back();
-		out += "} catch (const gn::Abort &) { " + failed + " = true; }\n}\n" + v.closes + "}\nif (" + failed + ") { throw gn::Abort{}; }\n}\n";
+		out += "} catch (const gn::Abort &) { " + failed + " = true; }\n}\n" + v.closes + "}\nif (" + failed + ") { throw gn::Abort{}; }\n" + after + "}\n";
 		omp_detach_writes(outermost, detach_at, saved_writes);
 		omp = saved;
+	}
+
+	std::string omp_wait() const {
+		return omp.barrier + ".wait(" + omp.team_failed + ");\n";
 	}
 
 	void omp_atomic() {
@@ -2571,7 +2588,8 @@ class Compiler {
 			throw Err{ line, "#pragma omp " + d.kind + " cannot be nested inside for, single or critical" };
 		}
 		if (d.kind == "barrier") {
-			out += "#pragma omp barrier\n";
+			// shortcut: a barrier, for or single outside a parallel block in the same function keeps OpenMP's own wait, so a failure elsewhere in the team can still hang it, sharing the team state across calls would fix that.
+			out += omp.barrier.empty() ? "#pragma omp barrier\n" : omp_wait();
 		} else if (d.kind == "atomic") {
 			omp_atomic();
 		} else if (d.kind == "parallel" || d.kind == "critical" || d.kind == "single") {

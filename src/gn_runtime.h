@@ -7,6 +7,11 @@
 #include <coroutine>
 #include <functional>
 #include <memory>
+#include <thread>
+
+#ifdef _OPENMP
+#include <omp.h>
+#endif
 
 #include <godot_cpp/classes/object.hpp>
 #include <godot_cpp/core/math.hpp>
@@ -24,6 +29,32 @@ namespace gn {
 using namespace godot;
 
 struct Abort {};
+
+// A thread that fails skips the rest of a parallel block, so waiting has to end on failure instead of on a full count.
+class TeamBarrier {
+	std::atomic<int> arrived{ 0 };
+	std::atomic<int> round{ 0 };
+
+public:
+	void wait(const std::atomic<bool> &failed) {
+#ifdef _OPENMP
+		const int team = omp_get_num_threads();
+#else
+		const int team = 1;
+#endif
+		const int current = round.load();
+		if (arrived.fetch_add(1) + 1 == team) {
+			arrived.store(0);
+			round.fetch_add(1);
+		}
+		while (round.load() == current && !failed.load()) {
+			std::this_thread::yield();
+		}
+		if (failed.load()) {
+			throw Abort{};
+		}
+	}
+};
 
 // A Variant holds packed arrays by reference, so keeping one here shares writes the way GDScript does.
 template <typename A>
