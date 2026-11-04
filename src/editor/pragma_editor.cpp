@@ -45,6 +45,98 @@ std::string directive_at(const std::string &after) {
 	return found;
 }
 
+std::vector<std::string> pragma_options(const std::string &before, const std::vector<std::string> &locals) {
+	std::string line = left_trim(before);
+	if (line.compare(0, 8, "#pragma ") != 0) {
+		return {};
+	}
+	std::string rest = line.substr(8);
+	size_t partial = rest.size();
+	while (partial > 0 && word_char(rest[partial - 1])) {
+		partial--;
+	}
+	std::string base = left_trim(rest.substr(0, partial));
+	if (base.empty()) {
+		return { "omp ", "end " };
+	}
+	if (base == "end ") {
+		return { "parallel", "critical", "single" };
+	}
+	if (base.compare(0, 4, "omp ") != 0) {
+		return {};
+	}
+	std::string after = left_trim(base.substr(4));
+	std::string kind = directive_at(after);
+	if (kind.empty()) {
+		std::vector<std::string> names;
+		for (const auto &d : gn::omp_directives()) {
+			if (d.first.compare(0, 4, "end ") != 0) {
+				names.push_back(d.first + " ");
+			}
+		}
+		return names;
+	}
+	int depth = 0;
+	size_t open = std::string::npos;
+	for (size_t i = kind.size(); i < after.size(); i++) {
+		if (after[i] == '(' && depth++ == 0) {
+			open = i;
+		} else if (after[i] == ')') {
+			depth--;
+		}
+	}
+	if (depth > 0) {
+		size_t from = open;
+		while (from > 0 && word_char(after[from - 1])) {
+			from--;
+		}
+		std::string clause = after.substr(from, open - from), inside = after.substr(open + 1);
+		if (clause == "schedule") {
+			return inside.find(',') == std::string::npos ? std::vector<std::string>{ "static", "dynamic", "guided" } : std::vector<std::string>{};
+		}
+		if (clause == "reduction" && inside.find(':') == std::string::npos) {
+			return { "+:", "*:", "min:", "max:" };
+		}
+		return clause.empty() ? std::vector<std::string>{} : locals;
+	}
+	std::vector<std::string> names;
+	if (kind == "parallel") {
+		names.push_back("for ");
+	}
+	for (const std::string &clause : gn::omp_directives().at(kind)) {
+		names.push_back(clause == "nowait" ? clause : clause + "(");
+	}
+	return names;
+}
+
+std::vector<std::string> locals_before(CodeEdit *code, int line) {
+	std::vector<std::string> names;
+	const auto add_word = [&](const std::string &text, size_t from) {
+		size_t end = from;
+		while (end < text.size() && word_char(text[end])) {
+			end++;
+		}
+		if (end > from && std::find(names.begin(), names.end(), text.substr(from, end - from)) == names.end()) {
+			names.push_back(text.substr(from, end - from));
+		}
+	};
+	for (int i = line; i >= 0; i--) {
+		std::string text = left_trim(utf8(code->get_line(i)));
+		if (text.compare(0, 4, "var ") == 0) {
+			add_word(text, 4);
+		}
+		if (text.compare(0, 5, "func ") == 0 || text.compare(0, 12, "static func ") == 0) {
+			size_t at = text.find('(');
+			while (at != std::string::npos && at + 1 < text.size() && text[at] != ')') {
+				add_word(text, text.find_first_not_of(" \t", at + 1));
+				at = text.find(',', at + 1);
+			}
+			break;
+		}
+	}
+	return names;
+}
+
 } // namespace
 
 namespace godot {
@@ -135,6 +227,28 @@ class PragmaOverlay : public Control {
 	CodeEdit *code = nullptr;
 	String path;
 
+	std::vector<std::string> options_at_caret() const {
+		int line = code->get_caret_line();
+		return pragma_options(utf8(code->get_line(line).substr(0, code->get_caret_column())), locals_before(code, line));
+	}
+
+	void on_text_changed() {
+		if (!options_at_caret().empty()) {
+			code->request_code_completion(true);
+		}
+	}
+
+	void on_completion_requested() {
+		std::vector<std::string> options = options_at_caret();
+		for (const std::string &option : options) {
+			String text = String::utf8(option.c_str());
+			code->add_code_completion_option(CodeEdit::KIND_PLAIN_TEXT, text.strip_edges(), text);
+		}
+		if (!options.empty()) {
+			code->update_code_completion_options(true);
+		}
+	}
+
 protected:
 	static void _bind_methods() {}
 
@@ -157,6 +271,8 @@ public:
 		code->set_meta(OVERLAY_META, this);
 		set_anchors_and_offsets_preset(PRESET_FULL_RECT);
 		set_mouse_filter(MOUSE_FILTER_IGNORE);
+		code->connect("text_changed", callable_mp(this, &PragmaOverlay::on_text_changed));
+		code->connect("code_completion_requested", callable_mp(this, &PragmaOverlay::on_completion_requested));
 		wrap_highlighter();
 	}
 };

@@ -51,11 +51,33 @@ func highlighting() -> Dictionary:
 	}
 
 
+func suggest(text: String) -> Array:
+	code.set_line(PRAGMA_LINE, text)
+	code.set_caret_line(PRAGMA_LINE)
+	code.set_caret_column(text.length())
+	code.request_code_completion(true)
+	await wait(0.1)
+	var names := []
+	for option: Dictionary in code.get_code_completion_options():
+		names.append(option["display_text"])
+	code.cancel_code_completion()
+	return names
+
+
+func suggestions() -> Dictionary:
+	var result := {}
+	for text: String in ["\t#pragma ", "\t#pragma end ", "\t#pragma omp ", "\t#pragma omp par", "\t#pragma omp parallel ", "\t#pragma omp parallel for ", "\t#pragma omp for ", "\t#pragma omp critical ", "\t#pragma omp parallel for schedule(", "\t#pragma omp parallel for reduction(", "\t#pragma omp parallel for reduction(+:to", "\t#pragma omp parallel for private(", "\tvar plain := "]:
+		result[text.strip_edges()] = await suggest(text)
+	return result
+
+
 func run() -> void:
 	await wait(1.0)
 	EditorInterface.edit_script(load(SOURCE))
 	await wait(0.5)
 	code = EditorInterface.get_script_editor().get_current_editor().get_base_editor()
+	var good := code.text
 	var result := {"highlighter": code.syntax_highlighter.get_class(), "colors": highlighting()}
+	result["suggestions"] = await suggestions()
 	FileAccess.open(OUTPUT, FileAccess.WRITE).store_string(JSON.stringify(result))
 	get_tree().quit()

@@ -45,3 +45,23 @@ func test_pragma_lines_are_coloured_and_other_lines_keep_gdscript_colours() -> v
 	assert_eq(colors["plain_comment"], colors["comment"])
 	assert_eq(colors["code_keyword"], colors["keyword"])
 	assert_ne(colors["code_name"], colors["keyword"])
+
+
+func test_suggestions_follow_the_cursor() -> void:
+	var seen: Dictionary = probe_editor()["suggestions"]
+	assert_eq(seen["#pragma"], ["end", "omp"])
+	assert_eq(seen["#pragma end"], ["critical", "parallel", "single"])
+	for directive: String in ["atomic", "barrier", "critical", "for", "parallel", "parallel for", "simd", "single"]:
+		assert_has(seen["#pragma omp"], directive)
+	assert_does_not_have(seen["#pragma omp"], "end parallel")
+	assert_eq(seen["#pragma omp par"], ["parallel", "parallel for"])
+	assert_has(seen["#pragma omp parallel"], "for")
+	assert_has(seen["#pragma omp parallel"], "num_threads(")
+	assert_has(seen["#pragma omp parallel for"], "schedule(")
+	assert_has(seen["#pragma omp for"], "nowait")
+	assert_eq(seen["#pragma omp critical"], [])
+	assert_eq(seen["#pragma omp parallel for schedule("], ["dynamic", "guided", "static"])
+	assert_eq(seen["#pragma omp parallel for reduction("], ["*:", "+:", "max:", "min:"])
+	assert_eq(seen["#pragma omp parallel for reduction(+:to"], ["total"])
+	assert_has(seen["#pragma omp parallel for private("], "total")
+	assert_does_not_have(seen["var plain :="], "schedule(")
