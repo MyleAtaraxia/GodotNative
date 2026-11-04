@@ -30,7 +30,7 @@ makes Godot compile a GDScript copy, and the test would no longer run native.
 `compiler/test_editor.gd` opens a real headless editor and drives the script editor
 through the `addons/editor_probe` plugin, which it enables only for that run.
 
-`unit/test_parallel.gd` covers `#pragma omp`. Interpreted runs ignore the
+`unit/test_parallel.gd` covers the OpenMP pragmas. Interpreted runs ignore the
 directives, so its code must give the same result on one thread.
 
 `fallback/` checks API newer than the compiled one. It needs Godot 4.7 with

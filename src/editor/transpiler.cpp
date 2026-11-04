@@ -47,10 +47,6 @@ std::string first_line(const std::string &src) {
 	return "";
 }
 
-bool omp_line(const std::string &src, size_t i) {
-	return src.compare(i, 11, "#pragma omp") == 0 || src.compare(i, 12, "#pragma end ") == 0;
-}
-
 std::vector<Tok> tokenize(const std::string &src) {
 	std::vector<Tok> out;
 	std::vector<int> indents{ 0 };
@@ -69,7 +65,7 @@ std::vector<Tok> tokenize(const std::string &src) {
 			if (i >= src.size()) {
 				break;
 			}
-			if (src[i] == '\n' || src[i] == '\r' || (src[i] == '#' && !omp_line(src, i))) {
+			if (src[i] == '\n' || src[i] == '\r' || (src[i] == '#' && omp_words_at(src, i) == std::string::npos)) {
 				while (i < src.size() && src[i] != '\n') {
 					i++;
 				}
@@ -115,9 +111,9 @@ std::vector<Tok> tokenize(const std::string &src) {
 			while (i < src.size() && src[i] != '\n') {
 				i++;
 			}
-			if (omp_line(src, b) && (out.empty() || out.back().k == TK::NL || out.back().k == TK::Indent || out.back().k == TK::Dedent)) {
-				std::string text = src.substr(b, i - b);
-				text = text.compare(0, 12, "#pragma end ") == 0 ? "#pragma omp" + text.substr(7) : text;
+			size_t words = omp_words_at(src, b);
+			if (words != std::string::npos && (out.empty() || out.back().k == TK::NL || out.back().k == TK::Indent || out.back().k == TK::Dedent)) {
+				std::string text = "#pragma omp " + src.substr(words, i - words);
 				out.push_back({ TK::Id, "#pragma omp", line, text.substr(0, text.find('#', 1)) });
 			}
 		} else if (isalpha((unsigned char)c) || c == '_') {
@@ -2428,7 +2424,7 @@ class Compiler {
 
 	void omp_region(const OmpDirective &d, int line) {
 		if (cur->coroutine) {
-			throw Err{ line, "#pragma omp " + d.kind + " cannot be in a function that uses await" };
+			throw Err{ line, "#pragma " + d.kind + " cannot be in a function that uses await" };
 		}
 		bool team = d.kind == "parallel";
 		bool wait = d.kind == "single" && !d.nowait && !omp.barrier.empty();
@@ -2490,7 +2486,7 @@ class Compiler {
 			throw Err{ line, "a parallel loop cannot be in a function that uses await" };
 		}
 		if (omp.work && d.kind != "parallel for") {
-			throw Err{ line, "#pragma omp " + d.kind + " cannot be nested inside for, single or critical" };
+			throw Err{ line, "#pragma " + d.kind + " cannot be nested inside for, single or critical" };
 		}
 		bool simd = d.kind == "simd", team = d.kind == "parallel for";
 		std::string start = temp(), stride = temp(), count = temp(), failed = temp(), k = temp();
@@ -2557,7 +2553,7 @@ class Compiler {
 		E l = expr();
 		static const std::set<std::string> ops = { "+=", "-=", "*=", "&=", "|=", "^=" };
 		if (tk().k != TK::Op || !ops.count(tk().s)) {
-			throw Err{ line, "#pragma omp atomic needs a statement like 'x += y'" };
+			throw Err{ line, "#pragma atomic needs a statement like 'x += y'" };
 		}
 		std::string op = t[p++].s;
 		E r = expr();
@@ -2566,7 +2562,7 @@ class Compiler {
 		bool lvalue = l.set.size() > tail.size() && l.set[0] == '(' && l.set.compare(l.set.size() - tail.size(), tail.size(), tail) == 0;
 		bool bitwise = op == "&=" || op == "|=" || op == "^=";
 		if (!lvalue || (l.t != Ty::Int && (l.t != Ty::Float || bitwise))) {
-			throw Err{ line, "#pragma omp atomic needs an int or float variable or packed array element" };
+			throw Err{ line, "#pragma atomic needs an int or float variable or packed array element" };
 		}
 		omp_note_write(l);
 		std::string v = temp();
@@ -2579,13 +2575,13 @@ class Compiler {
 		p++;
 		nl();
 		if (omp.simd) {
-			throw Err{ line, "a simd loop cannot contain #pragma omp directives" };
+			throw Err{ line, "a simd loop cannot contain #pragma directives" };
 		}
 		if (d.kind.compare(0, 4, "end ") == 0) {
 			throw Err{ line, "#pragma " + d.kind + " has no matching start" };
 		}
 		if ((d.kind == "barrier" || d.kind == "single") && omp.work) {
-			throw Err{ line, "#pragma omp " + d.kind + " cannot be nested inside for, single or critical" };
+			throw Err{ line, "#pragma " + d.kind + " cannot be nested inside for, single or critical" };
 		}
 		if (d.kind == "barrier") {
 			// shortcut: a barrier, for or single outside a parallel block in the same function keeps OpenMP's own wait, so a failure elsewhere in the team can still hang it, sharing the team state across calls would fix that.
@@ -2595,7 +2591,7 @@ class Compiler {
 		} else if (d.kind == "parallel" || d.kind == "critical" || d.kind == "single") {
 			omp_region(d, line);
 		} else if (!eat("for")) {
-			throw Err{ line, "#pragma omp " + d.kind + " must come right before a for loop" };
+			throw Err{ line, "#pragma " + d.kind + " must come right before a for loop" };
 		} else {
 			for_stmt(&d);
 		}
@@ -4061,6 +4057,21 @@ const std::map<std::string, std::set<std::string>> &omp_directives() {
 		{ "end single", {} },
 	};
 	return directives;
+}
+
+size_t omp_words_at(const std::string &text, size_t at) {
+	if (text.compare(at, 8, "#pragma ") != 0) {
+		return std::string::npos;
+	}
+	const auto is_word = [&](size_t i, const char *word) {
+		const size_t size = strlen(word);
+		return text.compare(i, size, word) == 0 && (i + size == text.size() || !(isalnum((unsigned char)text[i + size]) || text[i + size] == '_'));
+	};
+	size_t i = std::min(text.find_first_not_of(" \t", at + 8), text.size());
+	if (is_word(i, "native")) {
+		return std::string::npos;
+	}
+	return is_word(i, "omp") ? std::min(text.find_first_not_of(" \t", i + 3), text.size()) : i;
 }
 
 bool is_toggled(const std::string &source) {

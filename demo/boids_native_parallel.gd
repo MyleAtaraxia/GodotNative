@@ -43,7 +43,7 @@ func setup(p_count: int, p_width: float, p_height: float) -> void:
 func step() -> void:
 	var view2: float = VIEW * VIEW
 	var avoid2: float = AVOID * AVOID
-	#pragma omp parallel for
+	#pragma parallel for
 	for i in range(count):
 		var x: float = px[i]
 		var y: float = py[i]

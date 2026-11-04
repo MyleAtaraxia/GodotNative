@@ -21,6 +21,8 @@ const CASES := [
 	["parallel over an array", "needs range", "#pragma native\nfunc f() -> void:\n\t#pragma omp parallel for\n\tfor i in [1, 2]: # error\n\t\tprint(i)\n"],
 	["pragma without a loop", "right before a for loop", "#pragma native\nfunc f() -> void:\n\t#pragma omp parallel for # error\n\tprint(1)\n"],
 	["unsupported directive", "unsupported OpenMP directive", "#pragma native\nfunc f() -> void:\n\t#pragma omp task # error\n\tprint(1)\n"],
+	["misspelled directive", "unsupported OpenMP directive", "#pragma native\nfunc f() -> void:\n\t#pragma paralel for # error\n\tprint(1)\n"],
+	["short form error", "#pragma parallel for must come", "#pragma native\nfunc f() -> void:\n\t#pragma parallel for # error\n\tprint(1)\n"],
 	["missing end", "missing #pragma end parallel", "#pragma native\nfunc f() -> void:\n\t#pragma omp parallel # error\n\tprint(1)\n"],
 	["stray end", "no matching start", "#pragma native\nfunc f() -> void:\n\tprint(1)\n\t#pragma end critical # error\n"],
 	["wrong end", "no matching start", "#pragma native\nfunc f() -> void:\n\t#pragma omp parallel\n\t#pragma end single # error\n"],

@@ -51,6 +51,23 @@ func highlighting() -> Dictionary:
 	}
 
 
+func colors_with_edits() -> Dictionary:
+	var pragma := code.get_line(PRAGMA_LINE)
+	code.set_line(PRAGMA_LINE, "\t#pragma parallel for reduction(+:total)")
+	var seen := {
+		"short_directive": color_at(PRAGMA_LINE, 10),
+		"short_clause": color_at(PRAGMA_LINE, 22),
+	}
+	code.set_line(PRAGMA_LINE, "\t#pragma end parallel")
+	seen["short_end"] = color_at(PRAGMA_LINE, 10)
+	code.set_line(PRAGMA_LINE, "\t#pragma hello there")
+	seen["not_a_directive"] = color_at(PRAGMA_LINE, 10)
+	code.set_line(PRAGMA_LINE, "\t#pragma native")
+	seen["native_too_late"] = color_at(PRAGMA_LINE, 10)
+	code.set_line(PRAGMA_LINE, pragma)
+	return seen
+
+
 func suggest(text: String) -> Array:
 	code.set_line(PRAGMA_LINE, text)
 	code.set_caret_line(PRAGMA_LINE)
@@ -94,7 +111,7 @@ func styles() -> Dictionary:
 
 func suggestions() -> Dictionary:
 	var result := {}
-	for text: String in ["\t#pragma ", "\t#pragma end ", "\t#pragma omp ", "\t#pragma omp par", "\t#pragma omp parallel ", "\t#pragma omp parallel for ", "\t#pragma omp for ", "\t#pragma omp critical ", "\t#pragma omp parallel for schedule(", "\t#pragma omp parallel for reduction(", "\t#pragma omp parallel for reduction(+:to", "\t#pragma omp parallel for private(", "\tvar plain := "]:
+	for text: String in ["\t#pragma ", "\t#pragma end ", "\t#pragma par", "\t#pragma parallel for ", "\t#pragma hello ", "\t#pragma omp ", "\t#pragma omp par", "\t#pragma omp parallel ", "\t#pragma omp parallel for ", "\t#pragma omp for ", "\t#pragma omp critical ", "\t#pragma omp parallel for schedule(", "\t#pragma omp parallel for reduction(", "\t#pragma omp parallel for reduction(+:to", "\t#pragma omp parallel for private(", "\tvar plain := "]:
 		result[text.strip_edges()] = await suggest(text)
 	return result
 
@@ -123,6 +140,7 @@ func run() -> void:
 	code = EditorInterface.get_script_editor().get_current_editor().get_base_editor()
 	var good := code.text
 	var result := {"highlighter": code.syntax_highlighter.get_class(), "colors": highlighting()}
+	result["edited_colors"] = colors_with_edits()
 	result["suggestions"] = await suggestions()
 	result["styles"] = await styles()
 	code.text = good

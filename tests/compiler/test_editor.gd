@@ -47,9 +47,25 @@ func test_pragma_lines_are_coloured_and_other_lines_keep_gdscript_colours() -> v
 	assert_ne(colors["code_name"], colors["keyword"])
 
 
+func test_short_pragmas_and_the_native_line_are_coloured() -> void:
+	var editor := probe_editor()
+	var colors: Dictionary = editor["colors"]
+	var seen: Dictionary = editor["edited_colors"]
+	assert_eq(seen["short_directive"], colors["keyword"])
+	assert_eq(seen["short_clause"], colors["clause_color"])
+	assert_eq(seen["short_end"], colors["keyword"])
+	assert_eq(seen["not_a_directive"], colors["comment"])
+	assert_eq(seen["native_too_late"], colors["comment"])
+
+
 func test_suggestions_follow_the_cursor() -> void:
 	var seen: Dictionary = probe_editor()["suggestions"]
-	assert_eq(seen["#pragma"], ["end", "omp"])
+	for directive: String in ["atomic", "barrier", "critical", "end", "for", "parallel", "parallel for", "simd", "single"]:
+		assert_has(seen["#pragma"], directive)
+	assert_does_not_have(seen["#pragma"], "omp")
+	assert_eq(seen["#pragma par"], ["parallel", "parallel for"])
+	assert_has(seen["#pragma parallel for"], "schedule(…)")
+	assert_eq(seen["#pragma hello"], [])
 	assert_eq(seen["#pragma end"], ["critical", "parallel", "single"])
 	for directive: String in ["atomic", "barrier", "critical", "for", "parallel", "parallel for", "simd", "single"]:
 		assert_has(seen["#pragma omp"], directive)

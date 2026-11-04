@@ -61,20 +61,19 @@ std::vector<std::string> pragma_options(const std::string &before, const std::ve
 	while (partial > 0 && word_char(rest[partial - 1])) {
 		partial--;
 	}
-	std::string base = left_trim(rest.substr(0, partial));
-	if (base.empty()) {
-		return { "omp ", "end " };
+	std::string after = left_trim(rest.substr(0, partial));
+	if (after.compare(0, 4, "omp ") == 0) {
+		after = left_trim(after.substr(4));
 	}
-	if (base == "end ") {
+	if (after == "end ") {
 		return { "parallel", "critical", "single" };
 	}
-	if (base.compare(0, 4, "omp ") != 0) {
-		return {};
-	}
-	std::string after = left_trim(base.substr(4));
 	std::string kind = directive_at(after);
 	if (kind.empty()) {
-		std::vector<std::string> names;
+		if (!after.empty()) {
+			return {};
+		}
+		std::vector<std::string> names = { "end " };
 		for (const auto &d : gn::omp_directives()) {
 			if (d.first.compare(0, 4, "end ") != 0) {
 				names.push_back(d.first + " ");
@@ -185,7 +184,18 @@ public:
 		Dictionary base = inner->get_line_syntax_highlighting(p_line);
 		std::string line = utf8(get_text_edit()->get_line(p_line));
 		size_t at = line.find_first_not_of(" \t");
-		if (at == std::string::npos || (line.compare(at, 11, "#pragma omp") != 0 && line.compare(at, 12, "#pragma end ") != 0)) {
+		if (at == std::string::npos) {
+			return base;
+		}
+		size_t words = gn::omp_words_at(line, at);
+		if (words == std::string::npos) {
+			return base;
+		}
+		size_t end = std::min(line.find('#', at + 1), line.size());
+		std::string after = line.substr(words, end - words);
+		bool closes = after.compare(0, 4, "end ") == 0;
+		std::string kind = directive_at(closes ? after.substr(4) : after);
+		if (kind.empty() && !closes && line.compare(at, 11, "#pragma omp") != 0) {
 			return base;
 		}
 		Dictionary map;
@@ -196,13 +206,8 @@ public:
 			}
 		}
 		Variant comment = base.get(int(at), Variant());
-		size_t end = std::min(line.find('#', at + 1), line.size());
-		size_t words = at + 11;
 		map[int(at)] = color(keyword_color);
-		std::string after = left_trim(line.substr(words, end - words));
-		size_t kind_start = end - std::min(end - words, after.size());
-		std::string kind = directive_at(after.compare(0, 4, "end ") == 0 ? after.substr(4) : after);
-		size_t i = kind_start + (after.compare(0, 4, "end ") == 0 ? 4 : 0) + kind.size();
+		size_t i = words + (closes ? 4 : 0) + kind.size();
 		int depth = 0;
 		while (i < end) {
 			if (word_char(line[i]) && depth == 0) {
