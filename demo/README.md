@@ -2,7 +2,8 @@
 
 Naive O(n²) flocking, so the work is almost all GDScript. `boids_native.gd` and
 `boids_native_unsafe.gd` are copies of `boids_interpreted.gd`, differing only in
-the `#pragma` on the first line.
+the `#pragma` on the first line. `boids_native_parallel.gd` also adds
+`#pragma omp parallel for` above the main loop.
 
 From the repository root, with SCons and a C++ compiler installed:
 

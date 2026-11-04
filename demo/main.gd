@@ -6,6 +6,7 @@ const MODES := [
 	["interpreted", "res://boids_interpreted.gd"],
 	["native", "res://boids_native.gd"],
 	["native unsafe", "res://boids_native_unsafe.gd"],
+	["native parallel", "res://boids_native_parallel.gd"],
 ]
 
 var mode := 1
