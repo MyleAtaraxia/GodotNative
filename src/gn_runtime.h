@@ -13,15 +13,66 @@
 #include <godot_cpp/variant/string_name.hpp>
 #include <godot_cpp/variant/utility_functions.hpp>
 #include <godot_cpp/variant/variant.hpp>
+#include <godot_cpp/variant/variant_internal.hpp>
 
 #include <cstdint>
 #include <initializer_list>
+#include <type_traits>
 
 namespace gn {
 
 using namespace godot;
 
 struct Abort {};
+
+// A Variant holds packed arrays by reference, so keeping one here shares writes the way GDScript does.
+template <typename A>
+class Packed : public Variant {
+	A *items;
+
+	void bind() { items = VariantInternal::get_internal_value<A>(static_cast<Variant *>(this)); }
+
+public:
+	Packed() :
+			Variant(A()) { bind(); }
+	Packed(const A &value) :
+			Variant(value) { bind(); }
+	Packed(const Variant &value) :
+			Variant(value.get_type() == internal::VariantInternalType<A>::type ? value : Variant(value.operator A())) { bind(); }
+
+	operator const A &() const { return *items; }
+	const A &array() const { return *items; }
+	int64_t size() const { return items->size(); }
+	int64_t resize(int64_t count) const { return items->resize(count); }
+	template <typename T>
+	bool push_back(T value) const { return items->push_back(value); }
+	template <typename T>
+	bool append(T value) const { return items->append(value); }
+	auto ptr() const { return const_cast<const A *>(items)->ptr(); }
+	auto ptrw() const { return items->ptrw(); }
+	Packed duplicate() const { return Packed(items->duplicate()); }
+};
+
+using PackedFloats = Packed<PackedFloat64Array>;
+using PackedInts = Packed<PackedInt64Array>;
+
+template <typename T>
+struct RawType {
+	using type = T;
+};
+template <typename A>
+struct RawType<Packed<A>> {
+	using type = A;
+};
+
+template <typename T>
+inline const void *raw_arg(const T &value) {
+	return &value;
+}
+template <typename A>
+inline const void *raw_arg(const Packed<A> &value) {
+	return &value.array();
+}
 
 inline int64_t loop_count(int64_t from, int64_t to, int64_t step) {
 	if (step > 0) {
@@ -165,7 +216,11 @@ inline T cast(const Variant &v, Variant::Type t, const Loc &loc) {
 	if (got != t && !numeric && !Variant::can_convert_strict(got, t)) {
 		fail("Trying to assign a value of the wrong type.", loc);
 	}
-	return v.operator T();
+	if constexpr (std::is_constructible_v<T, const Variant &> && std::is_base_of_v<Variant, T> && !std::is_same_v<T, Variant>) {
+		return T(v);
+	} else {
+		return v.operator T();
+	}
 }
 
 struct Task {
@@ -199,15 +254,15 @@ Variant run(Task task, std::shared_ptr<void> keep = nullptr);
 
 template <typename R, typename... A>
 inline R pcall(GDExtensionMethodBindPtr mb, void *object, const A &...a) {
-	const void *args[] = { &a..., nullptr };
-	R r{};
+	const void *args[] = { raw_arg(a)..., nullptr };
+	typename RawType<R>::type r{};
 	gdextension_interface::object_method_bind_ptrcall(mb, object, args, &r);
 	return r;
 }
 
 template <typename... A>
 inline void pcall_void(GDExtensionMethodBindPtr mb, void *object, const A &...a) {
-	const void *args[] = { &a..., nullptr };
+	const void *args[] = { raw_arg(a)..., nullptr };
 	gdextension_interface::object_method_bind_ptrcall(mb, object, args, nullptr);
 }
 

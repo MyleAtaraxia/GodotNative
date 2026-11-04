@@ -225,6 +225,10 @@ std::vector<Tok> tokenize(const std::string &src) {
 	return out;
 }
 
+std::string unbox(const std::string &value, const std::string &type) {
+	return type.compare(0, 4, "gn::") == 0 ? type + "(" + value + ")" : "(" + value + ").operator " + type + "()";
+}
+
 const char *cty(Ty t) {
 	switch (t) {
 		case Ty::Void: return "void";
@@ -234,8 +238,8 @@ const char *cty(Ty t) {
 		case Ty::Str: return "String";
 		case Ty::V2: return "Vector2";
 		case Ty::V3: return "Vector3";
-		case Ty::PF64: return "PackedFloat64Array";
-		case Ty::PI64: return "PackedInt64Array";
+		case Ty::PF64: return "gn::PackedFloats";
+		case Ty::PI64: return "gn::PackedInts";
 		case Ty::Arr: return "Array";
 		case Ty::Dict: return "Dictionary";
 		case Ty::Var: return "Variant";
@@ -396,8 +400,8 @@ const std::vector<KnownMethod> &known_methods() {
 		{ Ty::V3, "dot", { Ty::V3 }, Ty::Float }, { Ty::V3, "cross", { Ty::V3 }, Ty::V3 }, { Ty::V3, "distance_to", { Ty::V3 }, Ty::Float },
 		{ Ty::V2, "length", {}, Ty::Float }, { Ty::V2, "length_squared", {}, Ty::Float }, { Ty::V2, "normalized", {}, Ty::V2 },
 		{ Ty::V2, "dot", { Ty::V2 }, Ty::Float }, { Ty::V2, "distance_to", { Ty::V2 }, Ty::Float },
-		{ Ty::PF64, "size", {}, Ty::Int }, { Ty::PF64, "resize", { Ty::Int }, Ty::Int }, { Ty::PF64, "push_back", { Ty::Float }, Ty::Bool }, { Ty::PF64, "append", { Ty::Float }, Ty::Bool },
-		{ Ty::PI64, "size", {}, Ty::Int }, { Ty::PI64, "resize", { Ty::Int }, Ty::Int }, { Ty::PI64, "push_back", { Ty::Int }, Ty::Bool }, { Ty::PI64, "append", { Ty::Int }, Ty::Bool },
+		{ Ty::PF64, "size", {}, Ty::Int }, { Ty::PF64, "resize", { Ty::Int }, Ty::Int }, { Ty::PF64, "push_back", { Ty::Float }, Ty::Bool }, { Ty::PF64, "append", { Ty::Float }, Ty::Bool }, { Ty::PF64, "duplicate", {}, Ty::PF64 },
+		{ Ty::PI64, "size", {}, Ty::Int }, { Ty::PI64, "resize", { Ty::Int }, Ty::Int }, { Ty::PI64, "push_back", { Ty::Int }, Ty::Bool }, { Ty::PI64, "append", { Ty::Int }, Ty::Bool }, { Ty::PI64, "duplicate", {}, Ty::PI64 },
 		{ Ty::Arr, "size", {}, Ty::Int }, { Ty::Str, "length", {}, Ty::Int }, { Ty::Dict, "size", {}, Ty::Int },
 	};
 	return k;
@@ -834,7 +838,7 @@ class Compiler {
 		}
 		if (e.t == Ty::Var) {
 			if (unsafe) {
-				return "(" + e.c + ").operator " + cty(to) + "()";
+				return unbox(e.c, cty(to));
 			}
 			return std::string("gn::cast<") + cty(to) + ">(" + e.c + ", Variant::" + vty(to) + ", " + L(line) + ")";
 		}
@@ -1228,7 +1232,7 @@ class Compiler {
 			e.ref.cls = object_return(native(), n);
 			return e;
 		}
-		return { "(" + call + ").operator " + cty(m.type) + "()", m.type };
+		return { unbox(call, cty(m.type)), m.type };
 	}
 
 	bool api_type(const std::string &name, Ty &ty, std::string &cpp, std::string &variant) const {
@@ -1296,7 +1300,7 @@ class Compiler {
 			std::string value;
 			if (!variant.empty()) {
 				std::string v = conv(a[i], Ty::Var, line);
-				value = unsafe ? "(" + v + ").operator " + cpp + "()" : "gn::cast<" + cpp + ">(" + v + ", Variant::" + variant + ", " + L(line) + ")";
+				value = unsafe ? unbox(v, cpp) : "gn::cast<" + cpp + ">(" + v + ", Variant::" + variant + ", " + L(line) + ")";
 			} else {
 				value = cpp + "(" + conv(a[i], ty, line) + ")";
 			}
@@ -1347,7 +1351,7 @@ class Compiler {
 				ref = last_ref;
 			}
 			std::string at = "*args[" + std::to_string(index) + "]";
-			std::string value = guard(ty == Ty::Var ? at : unsafe ? "(" + at + ").operator " + cty(ty) + "()" : std::string("gn::cast<") + cty(ty) + ">(" + at + ", Variant::" + vty(ty) + ", " + L(line) + ")", ref, L(line));
+			std::string value = guard(ty == Ty::Var ? at : unsafe ? unbox(at, cty(ty)) : std::string("gn::cast<") + cty(ty) + ">(" + at + ", Variant::" + vty(ty) + ", " + L(line) + ")", ref, L(line));
 			if (eat("=")) {
 				value = "argc > " + std::to_string(index) + " ? " + value + " : " + conv(expr(), ty, line);
 			} else {
@@ -1488,7 +1492,7 @@ class Compiler {
 			} else if (numeric(a[0].t)) {
 				r = { conv(a[0], to, line), to };
 			} else {
-				r = { "Variant(" + a[0].c + ").operator " + cty(to) + "()", to };
+				r = { unbox("Variant(" + a[0].c + ")", cty(to)), to };
 			}
 			return true;
 		}
@@ -1621,7 +1625,7 @@ class Compiler {
 			std::vector<E> a = args();
 			bool vector = c->second == Ty::V3 || c->second == Ty::V2;
 			if (!vector && !a.empty()) {
-				r = { std::string("(gn::construct(Variant::") + vty(c->second) + ", {" + var_args(a, line) + "}, " + L(line) + ")).operator " + cty(c->second) + "()", c->second };
+				r = { unbox(std::string("gn::construct(Variant::") + vty(c->second) + ", {" + var_args(a, line) + "}, " + L(line) + ")", cty(c->second)), c->second };
 				return true;
 			}
 			std::string s = std::string(cty(c->second)) + "(";
@@ -1943,7 +1947,7 @@ class Compiler {
 				throw Err{ line, "cannot use instance property " + n + " from a static function" };
 			}
 			std::string get = "owner->get(GN_SN(\"" + n + "\"))";
-			E e{ m.type == Ty::Var ? get : "(" + get + ").operator " + cty(m.type) + "()", m.type };
+			E e{ m.type == Ty::Var ? get : unbox(get, cty(m.type)), m.type };
 			e.set = "owner->set(GN_SN(\"" + n + "\"), Variant(%v))";
 			typed_property("(void *)owner->_owner", native(), n, e, line);
 			return e;
@@ -2054,7 +2058,7 @@ class Compiler {
 		if (b.set.empty()) {
 			return "";
 		}
-		std::string value = b.t == Ty::Var ? s : s + ".operator " + cty(b.t) + "()";
+		std::string value = b.t == Ty::Var ? s : unbox(s, cty(b.t));
 		return " if (" + s + ".get_type() != Variant::OBJECT) { " + subst(b.set, value) + "; }";
 	}
 
@@ -3639,7 +3643,7 @@ public:
 			return guard("*" + index, a.ref, loc);
 		}
 		if (unsafe) {
-			return index + "->operator " + cty(a.t) + "()";
+			return unbox("*" + index, cty(a.t));
 		}
 		return guard(std::string("gn::cast<") + cty(a.t) + ">(*" + index + ", Variant::" + vty(a.t) + ", " + loc + ")", a.ref, loc);
 	}
@@ -3770,7 +3774,7 @@ public:
 				has_onready = has_onready || m.onready;
 				std::string loc = "gn::Loc{ \"" + c->path + "\", \"" + m.name + "\", " + std::to_string(m.line) + " }";
 				if (m.is_static) {
-					std::string v = c->guard(m.t == Ty::Var ? "v" : c->unsafe ? std::string("v.operator ") + cty(m.t) + "()" : std::string("gn::cast<") + cty(m.t) + ">(v, Variant::" + vty(m.t) + ", " + loc + ")", m.ref, loc);
+					std::string v = c->guard(m.t == Ty::Var ? "v" : c->unsafe ? unbox("v", cty(m.t)) : std::string("gn::cast<") + cty(m.t) + ">(v, Variant::" + vty(m.t) + ", " + loc + ")", m.ref, loc);
 					std::string slot = c->struct_name() + "::s_" + m.name + "()";
 					std::string read = m.getter.empty() ? slot : "C::f_" + m.getter + "()";
 					std::string write = m.setter.empty() ? slot + " = " + v : "C::f_" + m.setter + "(" + v + ")";
@@ -3778,7 +3782,7 @@ public:
 					statics++;
 					continue;
 				}
-				std::string setv = c->guard(m.t == Ty::Var ? "v" : c->unsafe ? std::string("v.operator ") + cty(m.t) + "()" : std::string("gn::cast<") + cty(m.t) + ">(v, Variant::" + vty(m.t) + ", " + loc + ")", m.ref, loc);
+				std::string setv = c->guard(m.t == Ty::Var ? "v" : c->unsafe ? unbox("v", cty(m.t)) : std::string("gn::cast<") + cty(m.t) + ">(v, Variant::" + vty(m.t) + ", " + loc + ")", m.ref, loc);
 				std::string read = "((C *)s)->" + (m.getter.empty() ? "m_" + m.name : "f_" + m.getter + "()");
 				std::string write = m.setter.empty() ? "((C *)s)->m_" + m.name + " = " + setv : "((C *)s)->f_" + m.setter + "(" + setv + ")";
 				ptab += "\t{ \"" + m.name + "\", (GDExtensionVariantType)Variant::" + vty(m.t) + ", [](void *s, Variant &r) { r = Variant(" + read + "); }, [](void *s, const Variant &v) { " + write + "; }, " + std::to_string(m.usage) + " },\n";

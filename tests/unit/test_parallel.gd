@@ -39,6 +39,7 @@ func test_empty_range() -> void:
 func test_writing_an_array_with_a_second_reference() -> void:
 	var source := PackedInt64Array([1, 2, 3, 4])
 	assert_eq(parallel.writes_to_a_copy(source), PackedInt64Array([-1, -1, -1, -1]))
+	assert_eq(source, PackedInt64Array([-1, -1, -1, -1]))
 
 
 func test_serial_loops_keep_break_and_continue() -> void:
