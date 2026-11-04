@@ -64,6 +64,34 @@ func suggest(text: String) -> Array:
 	return names
 
 
+func style_of(text: String, display: String) -> Dictionary:
+	code.set_line(PRAGMA_LINE, text)
+	code.set_caret_line(PRAGMA_LINE)
+	code.set_caret_column(text.length())
+	code.request_code_completion(true)
+	await wait(0.1)
+	var style := {}
+	for option: Dictionary in code.get_code_completion_options():
+		if option["display_text"] == display:
+			style = {"kind": option["kind"], "icon": option["icon"] != null, "color": option["font_color"].to_html()}
+	code.cancel_code_completion()
+	return style
+
+
+func styles() -> Dictionary:
+	return {
+		"keyword": await style_of("\t#pragma omp ", "parallel"),
+		"clause": await style_of("\t#pragma omp parallel for ", "schedule(…)"),
+		"constant": await style_of("\t#pragma omp parallel for schedule(", "dynamic"),
+		"operator": await style_of("\t#pragma omp parallel for reduction(", "min"),
+		"local": await style_of("\t#pragma omp parallel for private(", "total"),
+		"expected_color": setting_color("completion_font_color"),
+		"function_kind": CodeEdit.KIND_FUNCTION,
+		"variable_kind": CodeEdit.KIND_VARIABLE,
+		"constant_kind": CodeEdit.KIND_CONSTANT,
+	}
+
+
 func suggestions() -> Dictionary:
 	var result := {}
 	for text: String in ["\t#pragma ", "\t#pragma end ", "\t#pragma omp ", "\t#pragma omp par", "\t#pragma omp parallel ", "\t#pragma omp parallel for ", "\t#pragma omp for ", "\t#pragma omp critical ", "\t#pragma omp parallel for schedule(", "\t#pragma omp parallel for reduction(", "\t#pragma omp parallel for reduction(+:to", "\t#pragma omp parallel for private(", "\tvar plain := "]:
@@ -96,6 +124,7 @@ func run() -> void:
 	var good := code.text
 	var result := {"highlighter": code.syntax_highlighter.get_class(), "colors": highlighting()}
 	result["suggestions"] = await suggestions()
+	result["styles"] = await styles()
 	code.text = good
 	result["errors"] = await errors(good)
 	FileAccess.open(OUTPUT, FileAccess.WRITE).store_string(JSON.stringify(result))

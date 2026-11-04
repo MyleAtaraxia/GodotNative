@@ -9,6 +9,7 @@
 #include <godot_cpp/classes/ref_counted.hpp>
 #include <godot_cpp/classes/script_editor.hpp>
 #include <godot_cpp/classes/script_editor_base.hpp>
+#include <godot_cpp/classes/texture2d.hpp>
 #include <godot_cpp/classes/timer.hpp>
 #include <godot_cpp/core/class_db.hpp>
 #include <godot_cpp/variant/packed_vector2_array.hpp>
@@ -247,11 +248,30 @@ class PragmaOverlay : public Control {
 		}
 	}
 
+	Ref<Texture2D> editor_icon(const StringName &name) const {
+		return code->get_theme_icon(code->has_theme_icon(name, "EditorIcons") ? name : StringName("BoxMesh"), "EditorIcons");
+	}
+
+	void add_option(const std::string &option, const std::vector<std::string> &locals, const Color &font_color) {
+		String text = String::utf8(option.c_str());
+		bool is_local = std::find(locals.begin(), locals.end(), option) != locals.end();
+		if (option.back() == '(') {
+			code->add_code_completion_option(CodeEdit::KIND_FUNCTION, text + String::utf8("…)"), text, font_color, editor_icon("MemberMethod"));
+		} else if (is_local) {
+			code->add_code_completion_option(CodeEdit::KIND_VARIABLE, text, text, font_color, editor_icon("LocalVariable"));
+		} else if (option.back() == ':' || option == "static" || option == "dynamic" || option == "guided") {
+			code->add_code_completion_option(CodeEdit::KIND_CONSTANT, text.trim_suffix(":"), text, font_color, editor_icon("MemberConstant"));
+		} else {
+			code->add_code_completion_option(CodeEdit::KIND_PLAIN_TEXT, text.strip_edges(), text, font_color, editor_icon("Keyword"));
+		}
+	}
+
 	void on_completion_requested() {
 		std::vector<std::string> options = options_at_caret();
+		std::vector<std::string> locals = locals_before(code, code->get_caret_line());
+		Color font_color = EditorInterface::get_singleton()->get_editor_settings()->get_setting("text_editor/theme/highlighting/completion_font_color");
 		for (const std::string &option : options) {
-			String text = String::utf8(option.c_str());
-			code->add_code_completion_option(CodeEdit::KIND_PLAIN_TEXT, text.strip_edges(), text);
+			add_option(option, locals, font_color);
 		}
 		if (!options.empty()) {
 			code->update_code_completion_options(true);

@@ -56,15 +56,26 @@ func test_suggestions_follow_the_cursor() -> void:
 	assert_does_not_have(seen["#pragma omp"], "end parallel")
 	assert_eq(seen["#pragma omp par"], ["parallel", "parallel for"])
 	assert_has(seen["#pragma omp parallel"], "for")
-	assert_has(seen["#pragma omp parallel"], "num_threads(")
-	assert_has(seen["#pragma omp parallel for"], "schedule(")
+	assert_has(seen["#pragma omp parallel"], "num_threads(…)")
+	assert_has(seen["#pragma omp parallel for"], "schedule(…)")
 	assert_has(seen["#pragma omp for"], "nowait")
 	assert_eq(seen["#pragma omp critical"], [])
 	assert_eq(seen["#pragma omp parallel for schedule("], ["dynamic", "guided", "static"])
-	assert_eq(seen["#pragma omp parallel for reduction("], ["*:", "+:", "max:", "min:"])
+	assert_eq(seen["#pragma omp parallel for reduction("], ["*", "+", "max", "min"])
 	assert_eq(seen["#pragma omp parallel for reduction(+:to"], ["total"])
 	assert_has(seen["#pragma omp parallel for private("], "total")
-	assert_does_not_have(seen["var plain :="], "schedule(")
+	assert_does_not_have(seen["var plain :="], "schedule(…)")
+
+
+func test_suggestions_use_the_editor_style() -> void:
+	var styles: Dictionary = probe_editor()["styles"]
+	for entry: String in ["keyword", "clause", "constant", "operator", "local"]:
+		assert_true(styles[entry]["icon"], entry)
+		assert_eq(styles[entry]["color"], styles["expected_color"], entry)
+	assert_eq(styles["clause"]["kind"], styles["function_kind"])
+	assert_eq(styles["constant"]["kind"], styles["constant_kind"])
+	assert_eq(styles["operator"]["kind"], styles["constant_kind"])
+	assert_eq(styles["local"]["kind"], styles["variable_kind"])
 
 
 func test_errors_mark_the_line_and_clear_when_fixed() -> void:
