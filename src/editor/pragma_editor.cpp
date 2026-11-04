@@ -51,7 +51,7 @@ std::string directive_at(const std::string &after) {
 	return found;
 }
 
-std::vector<std::string> pragma_options(const std::string &before, const std::vector<std::string> &locals) {
+std::vector<std::string> pragma_options(const std::string &before, const std::vector<std::string> &locals, bool first_line) {
 	std::string line = left_trim(before);
 	if (line.compare(0, 8, "#pragma ") != 0) {
 		return {};
@@ -62,6 +62,12 @@ std::vector<std::string> pragma_options(const std::string &before, const std::ve
 		partial--;
 	}
 	std::string after = left_trim(rest.substr(0, partial));
+	if (first_line) {
+		if (after.empty()) {
+			return { "native " };
+		}
+		return after == "native " ? std::vector<std::string>{ "unsafe" } : std::vector<std::string>{};
+	}
 	if (after.compare(0, 4, "omp ") == 0) {
 		after = left_trim(after.substr(4));
 	}
@@ -261,7 +267,11 @@ class PragmaOverlay : public Control {
 
 	std::vector<std::string> options_at_caret() const {
 		int line = code->get_caret_line();
-		return pragma_options(utf8(code->get_line(line).substr(0, code->get_caret_column())), locals_before(code, line));
+		bool first_line = true;
+		for (int i = 0; i < line && first_line; i++) {
+			first_line = code->get_line(i).strip_edges().is_empty();
+		}
+		return pragma_options(utf8(code->get_line(line).substr(0, code->get_caret_column())), locals_before(code, line), first_line);
 	}
 
 	void on_text_changed() {
