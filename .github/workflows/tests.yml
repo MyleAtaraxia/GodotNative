@@ -73,6 +73,11 @@ jobs:
         run: '"$GODOT" --headless --path tests -s addons/gut/gut_cmdln.gd -gconfig=res://.gutconfig.json'
       - name: Compiler tests
         run: '"$GODOT" --headless --path tests -s addons/gut/gut_cmdln.gd -gconfig=res://.gutconfig.json -gdir=res://compiler'
+      - name: Dynamic fallback tests
+        if: matrix.api != '4.4'
+        env:
+          GODOT_NATIVE_API: "4.4"
+        run: '"$GODOT" --headless --path tests -s addons/gut/gut_cmdln.gd -gconfig=res://.gutconfig.json -gdir=res://fallback'
       - name: Interpreted tests
         run: |
           printf '[godot_native]\n\nbuild/native_in_debug_runs=false\n' > tests/override.cfg

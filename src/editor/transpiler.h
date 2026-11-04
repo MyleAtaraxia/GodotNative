@@ -38,6 +38,7 @@ public:
 	virtual bool int_constant(const std::string &cls, const std::string &name, int64_t &value) const = 0;
 	virtual bool is_singleton(const std::string &name) const = 0;
 	virtual NativeBind bind(const std::string &cls, const std::string &name) const = 0;
+	virtual bool api_has_class(const std::string &name) const = 0;
 	virtual bool accessors(const std::string &cls, const std::string &name, std::string &getter, std::string &setter) const = 0;
 	virtual bool utility(const std::string &name, std::string &ret, bool &vararg) const = 0;
 	virtual bool has_signal(const std::string &cls, const std::string &name) const = 0;

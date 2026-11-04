@@ -13,6 +13,7 @@
 #include <godot_cpp/classes/engine.hpp>
 #include <godot_cpp/classes/file_access.hpp>
 #include <godot_cpp/classes/font.hpp>
+#include <godot_cpp/classes/gd_script.hpp>
 #include <godot_cpp/classes/json.hpp>
 #include <godot_cpp/classes/os.hpp>
 #include <godot_cpp/classes/project_settings.hpp>
@@ -55,6 +56,7 @@ struct ApiData {
 	std::map<std::string, ApiMethod> methods;
 	std::map<std::string, ApiProperty> properties;
 	std::map<std::string, std::string> parents;
+	std::set<std::string> classes;
 	std::map<std::string, std::pair<std::string, bool>> utilities;
 };
 
@@ -64,6 +66,10 @@ String project_root() {
 
 // shortcut: only Godot 4 is searched, and an engine newer than godot-cpp's bundled files uses the newest one. Upgrade godot-cpp to reach newer API.
 String native_api() {
+	String forced = OS::get_singleton()->get_environment("GODOT_NATIVE_API");
+	if (!forced.is_empty()) {
+		return forced;
+	}
 	int minor = Engine::get_singleton()->get_version_info()["minor"];
 	for (; minor > 4; minor--) {
 		if (FileAccess::file_exists(project_root().path_join("godot-cpp/gdextension/extension_api-4-" + String::num_int64(minor) + ".json"))) {
@@ -113,6 +119,7 @@ const ApiData &api_data() {
 	for (int i = 0; i < classes.size(); i++) {
 		Dictionary c = classes[i];
 		std::string name = std_str(c["name"]);
+		data->classes.insert(name);
 		if (c.has("inherits")) {
 			data->parents[name] = std_str(c["inherits"]);
 		}
@@ -204,6 +211,16 @@ public:
 		}
 		return r;
 	}
+	static bool evaluate(const std::string &expression, Variant &value) {
+		Ref<GDScript> probe;
+		probe.instantiate();
+		probe->set_source_code(String("static func value():\n\treturn ") + expression.c_str() + "\n");
+		if (probe->reload() != OK) {
+			return false;
+		}
+		value = probe->call("value");
+		return true;
+	}
 	bool int_constant(const std::string &cls, const std::string &name, int64_t &value) const override {
 		ClassDBSingleton *db = ClassDBSingleton::get_singleton();
 		if (!db->class_has_integer_constant(cls.c_str(), name.c_str())) {
@@ -242,6 +259,9 @@ public:
 			c = up->second;
 		}
 	}
+	bool api_has_class(const std::string &name) const override {
+		return api_data().classes.count(name) > 0;
+	}
 	bool accessors(const std::string &cls, const std::string &name, std::string &getter, std::string &setter) const override {
 		const ApiData &api = api_data();
 		std::string c = cls;
@@ -273,14 +293,20 @@ public:
 	}
 	bool global_constant(const std::string &name, int64_t &value) const override {
 		auto it = api_data().globals.find(name);
-		if (it == api_data().globals.end()) {
+		if (it != api_data().globals.end()) {
+			value = it->second;
+			return true;
+		}
+		Variant live;
+		if (!evaluate(name, live) || live.get_type() != Variant::INT) {
 			return false;
 		}
-		value = it->second;
+		value = live;
 		return true;
 	}
 	bool has_builtin_constant(const std::string &type, const std::string &name) const override {
-		return api_data().builtin_constants.count(type + "." + name) > 0;
+		Variant live;
+		return api_data().builtin_constants.count(type + "." + name) > 0 || evaluate(type + "." + name, live);
 	}
 	bool read(const std::string &path, std::string &source) const override {
 		String p = path.c_str();

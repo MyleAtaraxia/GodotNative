@@ -83,6 +83,7 @@ Variant load(const String &path);
 Variant native_script(const char *path);
 Object *script_object(const char *path);
 Variant static_call(GDExtensionMethodBindPtr mb, std::initializer_list<Variant> args, const Loc &loc);
+Variant dynamic_static(const char *cls, const char *name, std::initializer_list<Variant> args);
 GDExtensionMethodBindPtr method_bind(const char *cls, const char *name, int64_t hash);
 void *raw_object(const Variant &v);
 void *live_object(const Variant &v, const Loc &loc);

@@ -297,6 +297,16 @@ Variant static_call(GDExtensionMethodBindPtr mb, std::initializer_list<Variant> 
 	return r;
 }
 
+Variant dynamic_static(const char *cls, const char *name, std::initializer_list<Variant> args) {
+	Array list;
+	list.push_back(StringName(cls));
+	list.push_back(StringName(name));
+	for (const Variant &a : args) {
+		list.push_back(a);
+	}
+	return ClassDBSingleton::get_singleton()->callv("class_call_static", list);
+}
+
 void *raw_object(const Variant &v) {
 	static const GDExtensionTypeFromVariantConstructorFunc read = gdextension_interface::get_variant_to_type_constructor(GDEXTENSION_VARIANT_TYPE_OBJECT);
 	GDExtensionObjectPtr o = nullptr;

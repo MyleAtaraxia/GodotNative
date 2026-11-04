@@ -27,3 +27,8 @@ Unit tests load fixtures with `load()` and never name their classes. Naming one
 makes Godot compile a GDScript copy, and the test would no longer run native.
 
 `compiler/` runs a real export per case and needs SCons on the path.
+
+`fallback/` checks API newer than the compiled one. It needs Godot 4.7 with
+`GODOT_NATIVE_API=4.4` set, which compiles against the older API on purpose:
+
+    GODOT_NATIVE_API=4.4 godot --headless --path tests -s addons/gut/gut_cmdln.gd -gconfig=res://.gutconfig.json -gdir=res://fallback
