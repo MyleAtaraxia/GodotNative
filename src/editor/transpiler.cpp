@@ -2485,8 +2485,8 @@ class Compiler {
 		if (cur->coroutine) {
 			throw Err{ line, "a parallel loop cannot be in a function that uses await" };
 		}
-		if (omp.work && d.kind != "parallel for") {
-			throw Err{ line, "#pragma " + d.kind + " cannot be nested inside for, single or critical" };
+		if (omp.work && d.kind == "for") {
+			throw Err{ line, "#pragma for cannot be nested inside for, single or critical" };
 		}
 		bool simd = d.kind == "simd", team = d.kind == "parallel for";
 		std::string start = temp(), stride = temp(), count = temp(), failed = temp(), k = temp();
@@ -2505,8 +2505,7 @@ class Compiler {
 			for (const OmpReduction &r : d.reductions) {
 				clauses += " reduction(" + r.op + ":" + omp_reduction(r.var, line)->c + ")";
 			}
-			size_t saved_scope = omp_scope, at = out.size();
-			omp_scope = scopes.size();
+			size_t saved_scope = omp_scope, simd_scope = scopes.size(), at = out.size();
 			omp.simd = true;
 			scopes.emplace_back();
 			declare(n, Ty::Int, false, "");
@@ -2514,6 +2513,7 @@ class Compiler {
 			block();
 			std::string body = out.substr(at);
 			out.erase(at);
+			omp_scope = simd_scope;
 			out += omp_hoist(body) + "#pragma omp simd" + clauses + "\n" + loop + body + "}\n}\n";
 			scopes.pop_back();
 			omp_scope = saved_scope;

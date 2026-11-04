@@ -214,3 +214,57 @@ func simd_scale(a: PackedFloat64Array, factor: float) -> PackedFloat64Array:
 	for i in range(a.size()):
 		out[i] = a[i] * factor
 	return out
+
+
+func simd_in_team(a: PackedFloat64Array) -> PackedFloat64Array:
+	var result := PackedFloat64Array()
+	result.resize(a.size())
+	#pragma parallel for
+	for i in range(a.size()):
+		var seen: int = 0
+		var total: float = 0.0
+		var scratch := PackedFloat64Array()
+		scratch.resize(a.size())
+		#pragma simd reduction(+:seen,total)
+		for j in range(a.size()):
+			scratch[j] = a[j]
+			if j != i and a[j] < a[i]:
+				seen += 1
+				total += scratch[j]
+		result[i] = total + seen
+	return result
+
+
+func simd_in_for(a: PackedFloat64Array) -> float:
+	var total: float = 0.0
+	#pragma parallel
+	#pragma for
+	for i in range(4):
+		var part: float = 0.0
+		#pragma simd reduction(+:part)
+		for j in range(a.size()):
+			part += a[j]
+		#pragma atomic
+		total += part
+	#pragma end parallel
+	return total
+
+
+func simd_in_blocks(a: PackedFloat64Array) -> PackedFloat64Array:
+	var doubled := PackedFloat64Array()
+	doubled.resize(a.size())
+	var total: float = 0.0
+	#pragma parallel
+	#pragma single
+	#pragma simd reduction(+:total)
+	for i in range(a.size()):
+		total += a[i]
+	#pragma end single
+	#pragma critical
+	#pragma simd
+	for i in range(a.size()):
+		doubled[i] = a[i] * 2.0
+	#pragma end critical
+	#pragma end parallel
+	doubled.append(total)
+	return doubled

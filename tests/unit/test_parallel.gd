@@ -114,3 +114,17 @@ func test_simd_reduction() -> void:
 func test_simd_writes() -> void:
 	var a := PackedFloat64Array([1.0, 2.0, 3.0])
 	assert_eq(parallel.simd_scale(a, 2.0), PackedFloat64Array([2.0, 4.0, 6.0]))
+
+
+func test_simd_in_team() -> void:
+	var a := PackedFloat64Array([1.0, 2.0, 3.0, 4.0])
+	assert_eq(parallel.simd_in_team(a), PackedFloat64Array([0.0, 2.0, 5.0, 9.0]))
+
+
+func test_simd_in_for() -> void:
+	assert_eq(parallel.simd_in_for(PackedFloat64Array([1.0, 2.0])), 12.0)
+
+
+func test_simd_in_blocks() -> void:
+	var a := PackedFloat64Array([1.0, 2.0])
+	assert_eq(parallel.simd_in_blocks(a), PackedFloat64Array([2.0, 4.0, 3.0]))
