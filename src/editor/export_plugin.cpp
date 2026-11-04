@@ -64,7 +64,7 @@ const ApiData &api_data() {
 	}
 	data = new ApiData();
 	String root = ProjectSettings::get_singleton()->globalize_path("res://").trim_suffix("/").get_base_dir();
-	Dictionary api = JSON::parse_string(FileAccess::get_file_as_string(root.path_join("api/extension_api.json")));
+	Dictionary api = JSON::parse_string(FileAccess::get_file_as_string(root.path_join("godot-cpp/gdextension/extension_api-4-4.json")));
 	Array constants = api.get("global_constants", Array());
 	for (int i = 0; i < constants.size(); i++) {
 		Dictionary c = constants[i];

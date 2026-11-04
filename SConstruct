@@ -4,7 +4,7 @@ import os
 os.environ.setdefault("SCONS_CACHE_MSVC_CONFIG", "1")
 SetOption("implicit_cache", 1)
 
-ARGUMENTS.setdefault("custom_api_file", os.path.abspath(ARGUMENTS.get("api", "api/extension_api.json")))
+ARGUMENTS.setdefault("api_version", "4.4")
 project = ARGUMENTS.get("project", "demo")
 env = SConscript("godot-cpp/SConstruct")
 env.Decider("MD5-timestamp")

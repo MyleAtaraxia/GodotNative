@@ -758,8 +758,10 @@ void NativeScript::setup(const gn::Class *p_info) {
 	}
 	take_over_path(info->path);
 	// shortcut: scripts answer MyScript.foo() through this hook, which needs Godot 4.5. On 4.4 only instances reach statics. Upgrade if 4.4 users need it.
-	if (gdextension_interface::object_set_script_instance) {
-		gdextension_interface::object_set_script_instance(_owner, gdextension_interface::script_instance_create3(&script_side_info, this));
+	using SetScriptInstance = void (*)(GDExtensionObjectPtr, GDExtensionScriptInstancePtr);
+	if (int(Engine::get_singleton()->get_version_info()["minor"]) >= 5) {
+		SetScriptInstance set_script_instance = reinterpret_cast<SetScriptInstance>(gdextension_interface::get_proc_address("object_set_script_instance"));
+		set_script_instance(_owner, gdextension_interface::script_instance_create3(&script_side_info, this));
 	}
 	try {
 		info->static_init();

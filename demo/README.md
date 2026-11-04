@@ -6,8 +6,6 @@ the `#pragma` on the first line.
 
 From the repository root, with SCons and a C++ compiler installed:
 
-    mkdir -p api
-    (cd api && godot --headless --dump-extension-api)
     scons -j8 target=editor project=demo
 
 Then open `demo/` in Godot and press Play.
