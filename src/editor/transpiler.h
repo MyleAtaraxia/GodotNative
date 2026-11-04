@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <map>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -73,6 +74,7 @@ struct Options {
 };
 
 bool is_toggled(const std::string &source);
+const std::map<std::string, std::set<std::string>> &omp_directives();
 Output transpile_project(const std::vector<std::string> &toggled, const std::vector<std::string> &all, const std::vector<std::pair<std::string, std::string>> &embedded, const Options &options, const ProjectQuery &query);
 
 } // namespace gn

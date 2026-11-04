@@ -2223,19 +2223,7 @@ class Compiler {
 	}
 
 	static OmpDirective omp_parse(const std::string &text, int line) {
-		static const std::map<std::string, std::set<std::string>> allowed = {
-			{ "parallel for", { "shared", "private", "firstprivate", "reduction", "schedule", "num_threads", "if" } },
-			{ "parallel", { "shared", "private", "firstprivate", "reduction", "num_threads", "if" } },
-			{ "for", { "private", "firstprivate", "reduction", "schedule", "nowait" } },
-			{ "simd", { "private", "reduction" } },
-			{ "single", { "private", "firstprivate", "nowait" } },
-			{ "critical", {} },
-			{ "atomic", {} },
-			{ "barrier", {} },
-			{ "end parallel", {} },
-			{ "end critical", {} },
-			{ "end single", {} },
-		};
+		const std::map<std::string, std::set<std::string>> &allowed = omp_directives();
 		OmpDirective d;
 		size_t i = text.find_first_not_of(" \t", 11);
 		i = i == std::string::npos ? text.size() : i;
@@ -4035,6 +4023,23 @@ public:
 };
 
 } // namespace
+
+const std::map<std::string, std::set<std::string>> &omp_directives() {
+	static const std::map<std::string, std::set<std::string>> directives = {
+		{ "parallel for", { "shared", "private", "firstprivate", "reduction", "schedule", "num_threads", "if" } },
+		{ "parallel", { "shared", "private", "firstprivate", "reduction", "num_threads", "if" } },
+		{ "for", { "private", "firstprivate", "reduction", "schedule", "nowait" } },
+		{ "simd", { "private", "reduction" } },
+		{ "single", { "private", "firstprivate", "nowait" } },
+		{ "critical", {} },
+		{ "atomic", {} },
+		{ "barrier", {} },
+		{ "end parallel", {} },
+		{ "end critical", {} },
+		{ "end single", {} },
+	};
+	return directives;
+}
 
 bool is_toggled(const std::string &source) {
 	std::string l = first_line(source);

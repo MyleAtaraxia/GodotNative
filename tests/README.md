@@ -27,6 +27,8 @@ Unit tests load fixtures with `load()` and never name their classes. Naming one
 makes Godot compile a GDScript copy, and the test would no longer run native.
 
 `compiler/` runs a real export per case and needs SCons on the path.
+`compiler/test_editor.gd` opens a real headless editor and drives the script editor
+through the `addons/editor_probe` plugin, which it enables only for that run.
 
 `unit/test_parallel.gd` covers `#pragma omp`. Interpreted runs ignore the
 directives, so its code must give the same result on one thread.

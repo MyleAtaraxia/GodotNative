@@ -1,4 +1,4 @@
-#include "transpiler.h"
+#include "pragma_editor.h"
 
 #include <godot_cpp/classes/class_db_singleton.hpp>
 #include <godot_cpp/classes/control.hpp>
@@ -692,8 +692,10 @@ public:
 		register_settings();
 		exporter.instantiate();
 		add_export_plugin(exporter);
+		gn_pragma_editor_start();
 	}
 	void _exit_tree() override {
+		gn_pragma_editor_stop();
 		remove_export_plugin(exporter);
 		exporter.unref();
 	}
@@ -702,6 +704,7 @@ public:
 } // namespace godot
 
 void gn_register_editor() {
+	gn_register_pragma_editor();
 	GDREGISTER_INTERNAL_CLASS(NativeExportPlugin);
 	GDREGISTER_INTERNAL_CLASS(NativeEditorPlugin);
 }
