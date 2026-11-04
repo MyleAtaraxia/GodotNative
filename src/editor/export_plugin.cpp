@@ -333,6 +333,7 @@ void register_settings() {
 	add_setting("errors/project_scripts", gn::Options::ERRORS_FAIL, PROPERTY_HINT_ENUM, "Fail Export,Warn and Run Interpreted");
 	add_setting("errors/addon_scripts", gn::Options::ERRORS_FAIL, PROPERTY_HINT_ENUM, "Fail Export,Warn and Run Interpreted,Don't Scan Addons");
 	add_setting("warnings/untyped_code", gn::Options::UNTYPED_WARN, PROPERTY_HINT_ENUM, "Ignore,Warn,Error");
+	add_setting("build/native_in_debug_runs", true);
 	add_setting("build/jobs", 8, PROPERTY_HINT_RANGE, "0,256,1");
 	add_setting("build/scons_path", "scons");
 }
@@ -610,7 +611,15 @@ protected:
 	static void _bind_methods() {}
 
 public:
-	bool _build() override { return compile_native("template_debug", true); }
+	bool _build() override {
+		if (int_setting("build/native_in_debug_runs", 1)) {
+			return compile_native("template_debug", true);
+		}
+		if (!FileAccess::file_exists(library_path("template_debug"))) {
+			compile_native("template_debug", true);
+		}
+		return true;
+	}
 	void _enter_tree() override {
 		register_settings();
 		exporter.instantiate();

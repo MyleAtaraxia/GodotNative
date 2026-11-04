@@ -1,6 +1,8 @@
 #include <runtime.h>
 
 #include <godot_cpp/classes/engine.hpp>
+#include <godot_cpp/classes/os.hpp>
+#include <godot_cpp/classes/project_settings.hpp>
 #include <godot_cpp/classes/resource_loader.hpp>
 #include <godot_cpp/core/class_db.hpp>
 #include <godot_cpp/godot.hpp>
@@ -28,6 +30,9 @@ static void initialize(ModuleInitializationLevel level) {
 	if (level != MODULE_INITIALIZATION_LEVEL_SCENE) {
 		return;
 	}
+	if (OS::get_singleton()->has_feature("editor_runtime") && !bool(ProjectSettings::get_singleton()->get_setting("godot_native/build/native_in_debug_runs", true))) {
+		return;
+	}
 	GDREGISTER_CLASS(NativeCoroutine);
 	GDREGISTER_CLASS(NativeLanguage);
 	GDREGISTER_CLASS(NativeScript);
@@ -42,6 +47,9 @@ static void initialize(ModuleInitializationLevel level) {
 static void uninitialize(ModuleInitializationLevel level) {
 #ifndef TOOLS_ENABLED
 	if (level != MODULE_INITIALIZATION_LEVEL_SCENE) {
+		return;
+	}
+	if (loader.is_null()) {
 		return;
 	}
 	NativeScript::release_all();
