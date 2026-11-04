@@ -1,0 +1,77 @@
+name: tests
+
+on:
+  push:
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - godot: 4.4.1
+            gut: 9.4.0
+          - godot: 4.7.2
+            gut: 9.7.1
+    env:
+      SCONS_CACHE: ${{ github.workspace }}/.ci/scons
+      GODOT: ${{ github.workspace }}/.ci/godot/Godot_v${{ matrix.godot }}-stable_win64_console.exe
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install scons
+      - uses: actions/cache@v4
+        with:
+          path: .ci/godot
+          key: godot-${{ matrix.godot }}
+      - uses: actions/cache@v4
+        with:
+          path: .ci/scons
+          key: scons-${{ hashFiles('src/**', 'SConstruct', '.gitmodules') }}
+          restore-keys: scons-
+      - name: Install Godot
+        run: |
+          [ -f "$GODOT" ] && exit 0
+          mkdir -p .ci/godot
+          curl -fsSL -o .ci/godot.zip "https://github.com/godotengine/godot-builds/releases/download/${{ matrix.godot }}-stable/Godot_v${{ matrix.godot }}-stable_win64.exe.zip"
+          unzip -q .ci/godot.zip -d .ci/godot
+      - name: Install GUT
+        run: |
+          mkdir -p .ci/gut tests/addons
+          curl -fsSL "https://github.com/bitwes/Gut/archive/refs/tags/v${{ matrix.gut }}.tar.gz" | tar -xz -C .ci/gut --strip-components=1
+          cp -r .ci/gut/addons/gut tests/addons/gut
+      - name: Build the addon
+        run: |
+          scons -j4 target=editor project=tests
+          scons -j4 target=editor project=demo
+      - name: Import
+        run: |
+          "$GODOT" --headless --path tests --import || true
+          "$GODOT" --headless --path demo --import || true
+      - name: Compile the demo
+        run: |
+          mkdir -p demo/build
+          "$GODOT" --headless --path demo --export-pack boids build/boids.pck
+          test -f demo/addons/godot_native/bin/godot_native.windows.template_release.x86_64.dll
+      - name: Compile the fixtures
+        run: |
+          mkdir -p tests/build
+          "$GODOT" --headless --path tests --export-pack test build/test.pck
+          scons -j4 target=template_debug project=tests
+      - name: Native tests
+        run: '"$GODOT" --headless --path tests -s addons/gut/gut_cmdln.gd -gconfig=res://.gutconfig.json'
+      - name: Compiler tests
+        run: '"$GODOT" --headless --path tests -s addons/gut/gut_cmdln.gd -gconfig=res://.gutconfig.json -gdir=res://compiler'
+      - name: Interpreted tests
+        run: |
+          printf '[godot_native]\n\nbuild/native_in_debug_runs=false\n' > tests/override.cfg
+          "$GODOT" --headless --path tests -s addons/gut/gut_cmdln.gd -gconfig=res://.gutconfig.json
