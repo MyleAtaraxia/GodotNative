@@ -29,3 +29,9 @@ func boxed() -> int:
 
 static func label() -> String:
 	return "thing"
+
+
+func parent_state() -> String:
+	var dynamic: Variant = self
+	var parent: Node = dynamic.call("get_parent")
+	return "orphan" if parent == null else "attached"

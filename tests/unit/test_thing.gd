@@ -25,3 +25,8 @@ func test_static_call_on_script() -> void:
 		pending("Script-level statics need Godot 4.5")
 		return
 	assert_eq(script.label(), "thing")
+
+
+func test_null_object_from_dynamic_call_fits_a_typed_slot() -> void:
+	var thing = autofree(load("res://fixtures/thing.gd").new())
+	assert_eq(thing.parent_state(), "orphan")

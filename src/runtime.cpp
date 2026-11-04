@@ -489,8 +489,12 @@ Variant check_builtin(const Variant &v, Variant::Type type, const Loc &loc) {
 	return construct(type, { v }, loc);
 }
 
+static bool is_null(const Variant &v) {
+	return v.get_type() == Variant::NIL || (v.get_type() == Variant::OBJECT && raw_object(v) == nullptr);
+}
+
 Variant check_class(const Variant &v, const StringName &cls, const Loc &loc) {
-	if (v.get_type() == Variant::NIL) {
+	if (is_null(v)) {
 		return v;
 	}
 	if (!is_class(v, cls)) {
@@ -500,7 +504,7 @@ Variant check_class(const Variant &v, const StringName &cls, const Loc &loc) {
 }
 
 Variant check_script(const Variant &v, const char *path, const Loc &loc) {
-	if (v.get_type() == Variant::NIL) {
+	if (is_null(v)) {
 		return v;
 	}
 	if (!is_script(v, path)) {
