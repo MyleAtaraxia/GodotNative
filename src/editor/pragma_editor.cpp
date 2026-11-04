@@ -156,14 +156,26 @@ class PragmaHighlighter : public EditorSyntaxHighlighter {
 	GDCLASS(PragmaHighlighter, EditorSyntaxHighlighter)
 
 	Ref<SyntaxHighlighter> inner;
+	Color unsafe_color;
 	Color keyword_color;
 	Color clause_color;
 	Color text_color;
+	Color symbol_color;
+	Color number_color;
 
 	Variant color(const Color &value) const {
 		Dictionary entry;
 		entry["color"] = value;
 		return entry;
+	}
+
+	Color argument_color(const std::string &clause, const std::string &word, char next) const {
+		if (isdigit((unsigned char)word[0])) {
+			return number_color;
+		}
+		bool schedule_kind = clause == "schedule" && (word == "static" || word == "dynamic" || word == "guided");
+		bool reduction_kind = clause == "reduction" && next == ':';
+		return schedule_kind || reduction_kind ? keyword_color : text_color;
 	}
 
 protected:
@@ -177,9 +189,12 @@ public:
 	void _update_cache() override {
 		inner->update_cache();
 		Ref<EditorSettings> settings = EditorInterface::get_singleton()->get_editor_settings();
+		unsafe_color = settings->get_setting("text_editor/theme/highlighting/control_flow_keyword_color");
 		keyword_color = settings->get_setting("text_editor/theme/highlighting/keyword_color");
 		clause_color = settings->get_setting("text_editor/theme/highlighting/function_color");
 		text_color = settings->get_setting("text_editor/theme/highlighting/text_color");
+		symbol_color = settings->get_setting("text_editor/theme/highlighting/symbol_color");
+		number_color = settings->get_setting("text_editor/theme/highlighting/number_color");
 	}
 
 	void _clear_highlighting_cache() override {
@@ -194,9 +209,10 @@ public:
 		}
 		Dictionary map;
 		map[int(at)] = color(keyword_color);
+		map[int(at + 8)] = color(clause_color);
 		size_t unsafe = line.find("unsafe");
 		if (unsafe != std::string::npos) {
-			map[int(unsafe)] = color(clause_color);
+			map[int(unsafe)] = color(unsafe_color);
 		}
 		return map;
 	}
@@ -231,21 +247,24 @@ public:
 		}
 		Variant comment = base.get(int(at), Variant());
 		map[int(at)] = color(keyword_color);
+		map[int(at + 8)] = color(clause_color);
 		size_t i = words + (closes ? 4 : 0) + kind.size();
 		int depth = 0;
+		std::string clause;
 		while (i < end) {
-			if (word_char(line[i]) && depth == 0) {
-				map[int(i)] = color(clause_color);
+			size_t start = i;
+			if (word_char(line[i])) {
 				while (i < end && word_char(line[i])) {
 					i++;
 				}
+				std::string word = line.substr(start, i - start);
+				clause = depth == 0 ? word : clause;
+				map[int(start)] = color(depth == 0 ? clause_color : argument_color(clause, word, i < end ? line[i] : '\0'));
 				continue;
 			}
-			if (line[i] == '(') {
-				map[int(i)] = color(text_color);
-				depth++;
-			} else if (line[i] == ')' && --depth == 0 && i + 1 < end) {
-				map[int(i + 1)] = color(text_color);
+			depth += line[i] == '(' ? 1 : line[i] == ')' ? -1 : 0;
+			if (line[i] != ' ' && line[i] != '\t') {
+				map[int(i)] = color(symbol_color);
 			}
 			i++;
 		}

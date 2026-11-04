@@ -40,11 +40,17 @@ func highlighting() -> Dictionary:
 		"clause": color_at(PRAGMA_LINE, line.find("reduction")),
 		"second_clause": color_at(PRAGMA_LINE, line.find("schedule")),
 		"inside": color_at(PRAGMA_LINE, line.find("total")),
+		"operator": color_at(PRAGMA_LINE, line.find("+")),
+		"bracket": color_at(PRAGMA_LINE, line.find("(")),
+		"schedule_kind": color_at(PRAGMA_LINE, line.find("dynamic")),
 		"trailing_comment": color_at(PRAGMA_LINE, line.find("# note")),
 		"plain_comment": color_at(COMMENT_LINE, 2),
 		"code_keyword": color_at(CODE_LINE, 1),
 		"code_name": color_at(CODE_LINE, 5),
 		"keyword": setting_color("keyword_color"),
+		"control_flow": setting_color("control_flow_keyword_color"),
+		"symbol": setting_color("symbol_color"),
+		"number": setting_color("number_color"),
 		"clause_color": setting_color("function_color"),
 		"text": setting_color("text_color"),
 		"comment": setting_color("comment_color"),
@@ -61,6 +67,12 @@ func colors_with_edits() -> Dictionary:
 		"short_directive": color_at(PRAGMA_LINE, 10),
 		"short_clause": color_at(PRAGMA_LINE, 22),
 	}
+	code.set_line(PRAGMA_LINE, "\t#pragma parallel for num_threads(8) reduction(max:high) if(min > 1)")
+	var line := code.get_line(PRAGMA_LINE)
+	seen["number"] = color_at(PRAGMA_LINE, line.find("8"))
+	seen["reduction_kind"] = color_at(PRAGMA_LINE, line.find("max"))
+	seen["reduction_name"] = color_at(PRAGMA_LINE, line.find("high"))
+	seen["variable_named_like_a_kind"] = color_at(PRAGMA_LINE, line.find("min"))
 	code.set_line(PRAGMA_LINE, "\t#pragma end parallel")
 	seen["short_end"] = color_at(PRAGMA_LINE, 10)
 	code.set_line(PRAGMA_LINE, "\t#pragma hello there")
