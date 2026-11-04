@@ -5,6 +5,7 @@
 #include <godot_cpp/classes/dir_access.hpp>
 #include <godot_cpp/classes/display_server.hpp>
 #include <godot_cpp/classes/editor_export_platform.hpp>
+#include <godot_cpp/classes/engine.hpp>
 #include <godot_cpp/classes/editor_export_plugin.hpp>
 #include <godot_cpp/classes/editor_interface.hpp>
 #include <godot_cpp/classes/editor_plugin.hpp>
@@ -57,14 +58,28 @@ struct ApiData {
 	std::map<std::string, std::pair<std::string, bool>> utilities;
 };
 
+String project_root() {
+	return ProjectSettings::get_singleton()->globalize_path("res://").trim_suffix("/").get_base_dir();
+}
+
+// shortcut: only Godot 4 is searched, and an engine newer than godot-cpp's bundled files uses the newest one. Upgrade godot-cpp to reach newer API.
+String native_api() {
+	int minor = Engine::get_singleton()->get_version_info()["minor"];
+	for (; minor > 4; minor--) {
+		if (FileAccess::file_exists(project_root().path_join("godot-cpp/gdextension/extension_api-4-" + String::num_int64(minor) + ".json"))) {
+			break;
+		}
+	}
+	return "4." + String::num_int64(minor);
+}
+
 const ApiData &api_data() {
 	static ApiData *data = nullptr;
 	if (data) {
 		return *data;
 	}
 	data = new ApiData();
-	String root = ProjectSettings::get_singleton()->globalize_path("res://").trim_suffix("/").get_base_dir();
-	Dictionary api = JSON::parse_string(FileAccess::get_file_as_string(root.path_join("godot-cpp/gdextension/extension_api-4-4.json")));
+	Dictionary api = JSON::parse_string(FileAccess::get_file_as_string(project_root().path_join("godot-cpp/gdextension/extension_api-" + native_api().replace(".", "-") + ".json")));
 	Array constants = api.get("global_constants", Array());
 	for (int i = 0; i < constants.size(); i++) {
 		Dictionary c = constants[i];
@@ -383,7 +398,7 @@ String library_path(const String &target) {
 }
 
 String build_stamp(const gn::Output &r) {
-	std::string all = std::to_string(FileAccess::get_modified_time(library_path("editor")));
+	std::string all = std_str(native_api()) + std::to_string(FileAccess::get_modified_time(library_path("editor")));
 	for (const auto &file : r.files) {
 		all += file.first + file.second;
 	}
@@ -581,7 +596,7 @@ bool compile_native(const String &target, bool show_progress = false) {
 	Array output;
 	int jobs = int_setting("build/jobs", 8);
 	jobs = jobs > 0 ? jobs : OS::get_singleton()->get_processor_count();
-	PackedStringArray args = { "-C", root, "target=" + target, "project=" + project_dir.get_file(), "-j" + String::num_int64(jobs) };
+	PackedStringArray args = { "-C", root, "target=" + target, "project=" + project_dir.get_file(), "api_version=" + native_api(), "-j" + String::num_int64(jobs) };
 	bool popup = show_progress && DisplayServer::get_singleton()->get_name() != "headless";
 	int code = popup ? run_with_popup(args, root, target, sources, output) : OS::get_singleton()->execute(scons_path(), args, output, true);
 	if (code != 0) {

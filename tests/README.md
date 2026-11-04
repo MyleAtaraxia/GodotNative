@@ -9,7 +9,10 @@ From the repository root, with SCons and a C++ compiler installed:
     godot --headless --path tests --import
     mkdir -p tests/build
     godot --headless --path tests --export-pack test build/test.pck
-    scons -j8 target=template_debug project=tests
+    scons -j8 target=template_debug project=tests api_version=4.7
+
+Set `api_version` to your Godot version. The test project needs that debug build
+because GUT runs in a debug process, while `--export-pack` builds release.
 
 Then run the suites:
 

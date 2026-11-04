@@ -12,8 +12,10 @@ jobs:
       matrix:
         include:
           - godot: 4.4.1
+            api: "4.4"
             gut: 9.4.0
           - godot: 4.7.2
+            api: "4.7"
             gut: 9.7.1
     env:
       SCONS_CACHE: ${{ github.workspace }}/.ci/scons
@@ -66,7 +68,7 @@ jobs:
         run: |
           mkdir -p tests/build
           "$GODOT" --headless --path tests --export-pack test build/test.pck
-          scons -j4 target=template_debug project=tests
+          scons -j4 target=template_debug project=tests api_version=${{ matrix.api }}
       - name: Native tests
         run: '"$GODOT" --headless --path tests -s addons/gut/gut_cmdln.gd -gconfig=res://.gutconfig.json'
       - name: Compiler tests
