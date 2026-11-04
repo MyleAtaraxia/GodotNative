@@ -51,6 +51,10 @@ func test_short_pragmas_and_the_native_line_are_coloured() -> void:
 	var editor := probe_editor()
 	var colors: Dictionary = editor["colors"]
 	var seen: Dictionary = editor["edited_colors"]
+	assert_eq(seen["native"], colors["keyword"])
+	assert_eq(seen["native_word"], colors["keyword"])
+	assert_eq(seen["unsafe_pragma"], colors["keyword"])
+	assert_eq(seen["unsafe"], colors["clause_color"])
 	assert_eq(seen["short_directive"], colors["keyword"])
 	assert_eq(seen["short_clause"], colors["clause_color"])
 	assert_eq(seen["short_end"], colors["keyword"])

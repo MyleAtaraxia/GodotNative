@@ -180,12 +180,30 @@ public:
 		inner->clear_highlighting_cache();
 	}
 
+	Dictionary toggle_line(const Dictionary &base, const std::string &line, size_t at, int32_t p_line) const {
+		for (int i = 0; i < p_line; i++) {
+			if (!get_text_edit()->get_line(i).strip_edges().is_empty()) {
+				return base;
+			}
+		}
+		Dictionary map;
+		map[int(at)] = color(keyword_color);
+		size_t unsafe = line.find("unsafe");
+		if (unsafe != std::string::npos) {
+			map[int(unsafe)] = color(clause_color);
+		}
+		return map;
+	}
+
 	Dictionary _get_line_syntax_highlighting(int32_t p_line) const override {
 		Dictionary base = inner->get_line_syntax_highlighting(p_line);
 		std::string line = utf8(get_text_edit()->get_line(p_line));
 		size_t at = line.find_first_not_of(" \t");
 		if (at == std::string::npos) {
 			return base;
+		}
+		if (gn::is_toggled(line)) {
+			return toggle_line(base, line, at, p_line);
 		}
 		size_t words = gn::omp_words_at(line, at);
 		if (words == std::string::npos) {

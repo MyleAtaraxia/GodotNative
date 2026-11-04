@@ -52,9 +52,12 @@ func highlighting() -> Dictionary:
 
 
 func colors_with_edits() -> Dictionary:
+	var first := code.get_line(0)
 	var pragma := code.get_line(PRAGMA_LINE)
 	code.set_line(PRAGMA_LINE, "\t#pragma parallel for reduction(+:total)")
 	var seen := {
+		"native": color_at(0, 0),
+		"native_word": color_at(0, 8),
 		"short_directive": color_at(PRAGMA_LINE, 10),
 		"short_clause": color_at(PRAGMA_LINE, 22),
 	}
@@ -64,6 +67,10 @@ func colors_with_edits() -> Dictionary:
 	seen["not_a_directive"] = color_at(PRAGMA_LINE, 10)
 	code.set_line(PRAGMA_LINE, "\t#pragma native")
 	seen["native_too_late"] = color_at(PRAGMA_LINE, 10)
+	code.set_line(0, "#pragma native unsafe")
+	seen["unsafe_pragma"] = color_at(0, 8)
+	seen["unsafe"] = color_at(0, 16)
+	code.set_line(0, first)
 	code.set_line(PRAGMA_LINE, pragma)
 	return seen
 
