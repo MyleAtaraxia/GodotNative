@@ -382,6 +382,14 @@ String library_path(const String &target) {
 	return "res://addons/godot_native/bin/godot_native.windows." + target + ".x86_64.dll";
 }
 
+String build_stamp(const gn::Output &r) {
+	std::string all = std::to_string(FileAccess::get_modified_time(library_path("editor")));
+	for (const auto &file : r.files) {
+		all += file.first + file.second;
+	}
+	return String::utf8(all.c_str()).md5_text();
+}
+
 bool sync_generated(const gn::Output &r, int &sources) {
 	bool changed = false;
 	PackedStringArray ids;
@@ -561,9 +569,11 @@ bool compile_native(const String &target, bool show_progress = false) {
 	for (const std::string &p : r.implied) {
 		UtilityFunctions::print("[GodotNative] also compiled through inheritance: ", p.c_str());
 	}
-	// shortcut: only generated code is compared, so changing the addon's own runtime needs the old library deleted. Upgrade by hashing the runtime sources if that ever bites users.
 	int sources = 0;
-	if (!sync_generated(r, sources) && FileAccess::file_exists(library_path(target))) {
+	sync_generated(r, sources);
+	String stamp_path = String(GENERATED_DIR).path_join(".stamp_" + target);
+	String stamp = build_stamp(r);
+	if (FileAccess::file_exists(library_path(target)) && FileAccess::get_file_as_string(stamp_path) == stamp) {
 		return true;
 	}
 	String project_dir = ProjectSettings::get_singleton()->globalize_path("res://").trim_suffix("/");
@@ -578,6 +588,7 @@ bool compile_native(const String &target, bool show_progress = false) {
 		UtilityFunctions::push_error("[GodotNative] scons failed, ran ", scons_path(), ":\n", output);
 		return false;
 	}
+	FileAccess::open(stamp_path, FileAccess::WRITE)->store_string(stamp);
 	UtilityFunctions::print("[GodotNative] compiled ", int(r.files.size() / 2), " file(s) for ", target);
 	return true;
 }
@@ -598,9 +609,12 @@ public:
 	void _export_begin(const PackedStringArray &, bool is_debug, const String &, uint32_t) override {
 		// shortcut: a failure reports an export error and ships no library, but the export still writes its files because _export_begin cannot abort. Upgrade once a real export hook exists for this.
 		String target = is_debug ? "template_debug" : "template_release";
+		if (compile_native(target)) {
+			return;
+		}
 		DirAccess::remove_absolute(library_path(target));
 		Ref<EditorExportPlatform> platform = get_export_platform();
-		if (!compile_native(target) && platform.is_valid()) {
+		if (platform.is_valid()) {
 			platform->add_message(EditorExportPlatform::EXPORT_MESSAGE_ERROR, "GodotNative", "Native compile failed, so this export has no native library. See the Output panel.");
 		}
 	}
