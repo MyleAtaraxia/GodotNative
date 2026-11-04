@@ -1,0 +1,11 @@
+[configuration]
+
+entry_symbol = "godot_native_init"
+compatibility_minimum = "4.4"
+
+[libraries]
+
+windows.editor.x86_64 = "bin/godot_native.windows.editor.x86_64.dll"
+windows.editor.editor_runtime.x86_64 = "bin/godot_native.windows.template_debug.x86_64.dll"
+windows.template_debug.x86_64 = "bin/godot_native.windows.template_debug.x86_64.dll"
+windows.template_release.x86_64 = "bin/godot_native.windows.template_release.x86_64.dll"

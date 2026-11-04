@@ -6,8 +6,16 @@
 *.exp
 *.pdb
 __pycache__/
-api/
 demo/.godot/
 demo/addons/godot_native/bin/
 demo/addons/godot_native/generated/
 demo/build/
+.ci/
+tests/.godot/
+tests/addons/gut/
+tests/addons/godot_native/bin/
+tests/addons/godot_native/generated/
+tests/build/
+tests/probe/
+tests/override.cfg
+tests/**/*.uid
