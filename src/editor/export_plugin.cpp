@@ -62,7 +62,9 @@ struct ApiData {
 };
 
 String project_root() {
-	return ProjectSettings::get_singleton()->globalize_path("res://").trim_suffix("/").get_base_dir();
+	String project = ProjectSettings::get_singleton()->globalize_path("res://").trim_suffix("/");
+	String bundled = project.path_join("addons/godot_native/build");
+	return FileAccess::file_exists(bundled.path_join("SConstruct")) ? bundled : project.get_base_dir();
 }
 
 // shortcut: only Godot 4 is searched, and an engine newer than godot-cpp's bundled files uses the newest one. Upgrade godot-cpp to reach newer API.
@@ -646,11 +648,11 @@ bool compile_native(const String &target, bool show_progress = false) {
 		return true;
 	}
 	String project_dir = ProjectSettings::get_singleton()->globalize_path("res://").trim_suffix("/");
-	String root = project_dir.get_base_dir();
+	String root = project_root();
 	Array output;
 	int jobs = int_setting("build/jobs", 8);
 	jobs = jobs > 0 ? jobs : OS::get_singleton()->get_processor_count();
-	PackedStringArray args = { "-C", root, "target=" + target, "project=" + project_dir.get_file(), "api_version=" + native_api(), "-j" + String::num_int64(jobs) };
+	PackedStringArray args = { "-C", root, "target=" + target, "project=" + project_dir, "api_version=" + native_api(), "-j" + String::num_int64(jobs) };
 	bool popup = show_progress && DisplayServer::get_singleton()->get_name() != "headless";
 	int code = popup ? run_with_popup(args, root, target, sources, output) : OS::get_singleton()->execute(scons_path(), args, output, true);
 	if (code != 0) {

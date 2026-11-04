@@ -1,0 +1,61 @@
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+
+jobs:
+  release:
+    runs-on: windows-latest
+    permissions:
+      contents: write
+    env:
+      GODOT: ${{ github.workspace }}/.ci/godot/Godot_v4.7.2-stable_win64_console.exe
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install scons
+      - name: Install llvm-mingw
+        run: |
+          curl -fsSL -o .ci-llvm.zip "https://github.com/mstorsjo/llvm-mingw/releases/download/20260826/llvm-mingw-20260826-msvcrt-x86_64.zip"
+          unzip -q .ci-llvm.zip -d "$RUNNER_TEMP"
+          echo "$RUNNER_TEMP/llvm-mingw-20260826-msvcrt-x86_64/bin" >> "$GITHUB_PATH"
+      - name: Install Godot
+        run: |
+          mkdir -p .ci/godot
+          curl -fsSL -o .ci/godot.zip "https://github.com/godotengine/godot-builds/releases/download/4.7.2-stable/Godot_v4.7.2-stable_win64.exe.zip"
+          unzip -q .ci/godot.zip -d .ci/godot
+      - name: Package addon
+        run: |
+          addon=package/addons/godot_native
+          mkdir -p package/addons
+          cp -r demo/addons/godot_native package/addons/
+          scons -j4 target=editor project=package
+          find "$addon/bin" -type f ! -name '*.dll' -delete
+          mkdir -p "$addon/build/godot-cpp"
+          touch "$addon/build/.gdignore"
+          git archive HEAD SConstruct src | tar -x -C "$addon/build"
+          git -C godot-cpp archive HEAD LICENSE.md SConstruct binding_generator.py build_profile.py doc_source_generator.py make_interface_header.py gdextension include src tools | tar -x -C "$addon/build/godot-cpp"
+          cd package && 7z a -tzip ../godot_native.zip addons/godot_native
+      - name: Test the zip in a fresh project
+        run: |
+          mkdir "fresh project"
+          cp -r demo/. "fresh project/"
+          rm -rf "fresh project/addons" "fresh project/.godot"
+          cd "fresh project"
+          7z x -y ../godot_native.zip
+          "$GODOT" --headless --path . --import || true
+          mkdir -p build
+          "$GODOT" --headless --path . --export-pack boids build/boids.pck
+          test -f addons/godot_native/bin/godot_native.windows.template_release.x86_64.dll
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" godot_native.zip --title "$GITHUB_REF_NAME" --generate-notes
