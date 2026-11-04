@@ -3,7 +3,7 @@
 Tests use [GUT](https://github.com/bitwes/Gut). Install the release that matches
 your Godot version into `tests/addons/gut`: 9.7.1 for 4.7, 9.4.0 for 4.4.
 
-From the repository root, with SCons and a C++ compiler installed:
+From the repository root, with SCons and [llvm-mingw](https://github.com/mstorsjo/llvm-mingw) on the path:
 
     scons -j8 target=editor project=tests
     godot --headless --path tests --import

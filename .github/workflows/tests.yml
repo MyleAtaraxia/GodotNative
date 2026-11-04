@@ -31,6 +31,11 @@ jobs:
         with:
           python-version: "3.12"
       - run: pip install scons
+      - name: Install llvm-mingw
+        run: |
+          curl -fsSL -o .ci-llvm.zip "https://github.com/mstorsjo/llvm-mingw/releases/download/20260826/llvm-mingw-20260826-msvcrt-x86_64.zip"
+          unzip -q .ci-llvm.zip -d "$RUNNER_TEMP"
+          echo "$RUNNER_TEMP/llvm-mingw-20260826-msvcrt-x86_64/bin" >> "$GITHUB_PATH"
       - uses: actions/cache@v4
         with:
           path: .ci/godot

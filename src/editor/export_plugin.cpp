@@ -679,8 +679,7 @@ public:
 		// shortcut: a failure reports an export error and ships no library, but the export still writes its files because _export_begin cannot abort. Upgrade once a real export hook exists for this.
 		String target = is_debug ? "template_debug" : "template_release";
 		if (compile_native(target)) {
-			// shortcut: only MSVC's runtime is shipped, and from System32, MinGW's libgomp needs adding when that toolchain is supported
-			String runtime = OS::get_singleton()->get_environment("WINDIR").path_join("System32/vcomp140.dll");
+			String runtime = library_path(target).get_base_dir().path_join("libomp.dll");
 			if (uses_openmp && FileAccess::file_exists(runtime)) {
 				add_shared_object(runtime, PackedStringArray(), "");
 			}

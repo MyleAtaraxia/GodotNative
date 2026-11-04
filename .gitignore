@@ -1,6 +1,8 @@
 .sconsign.dblite
 .cache/
 *.os
+*.o
+*.a
 *.obj
 *.lib
 *.exp
