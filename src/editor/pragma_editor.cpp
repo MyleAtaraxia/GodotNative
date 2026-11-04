@@ -4,11 +4,14 @@
 #include <godot_cpp/classes/editor_interface.hpp>
 #include <godot_cpp/classes/editor_settings.hpp>
 #include <godot_cpp/classes/editor_syntax_highlighter.hpp>
+#include <godot_cpp/classes/font.hpp>
 #include <godot_cpp/classes/gd_script.hpp>
 #include <godot_cpp/classes/ref_counted.hpp>
 #include <godot_cpp/classes/script_editor.hpp>
 #include <godot_cpp/classes/script_editor_base.hpp>
+#include <godot_cpp/classes/timer.hpp>
 #include <godot_cpp/core/class_db.hpp>
+#include <godot_cpp/variant/packed_vector2_array.hpp>
 
 #include <algorithm>
 #include <cctype>
@@ -18,6 +21,7 @@ using namespace godot;
 
 namespace {
 
+const int CHECK_DELAY_MS = 400;
 const char *OVERLAY_META = "godot_native_overlay";
 
 std::string utf8(const String &s) {
@@ -225,7 +229,10 @@ class PragmaOverlay : public Control {
 	GDCLASS(PragmaOverlay, Control)
 
 	CodeEdit *code = nullptr;
+	Timer *timer = nullptr;
 	String path;
+	int error_line = -1;
+	String error_message;
 
 	std::vector<std::string> options_at_caret() const {
 		int line = code->get_caret_line();
@@ -233,6 +240,7 @@ class PragmaOverlay : public Control {
 	}
 
 	void on_text_changed() {
+		timer->start();
 		if (!options_at_caret().empty()) {
 			code->request_code_completion(true);
 		}
@@ -249,10 +257,33 @@ class PragmaOverlay : public Control {
 		}
 	}
 
+	void check() {
+		error_line = -1;
+		error_message = "";
+		std::string source = utf8(code->get_text()), file = utf8(path);
+		if (gn::is_toggled(source)) {
+			gn::Output result = gn_check_source(file, source);
+			size_t at = result.error.find(file + ":");
+			if (!result.ok && at != std::string::npos) {
+				size_t number = at + file.size() + 1;
+				error_line = atoi(result.error.c_str() + number) - 1;
+				size_t message = result.error.find(": ", number);
+				error_message = String::utf8(result.error.substr(message == std::string::npos ? number : message + 2).c_str());
+			}
+		}
+		queue_redraw();
+	}
+
 protected:
-	static void _bind_methods() {}
+	static void _bind_methods() {
+		ClassDB::bind_method(D_METHOD("get_error_line"), &PragmaOverlay::get_error_line);
+		ClassDB::bind_method(D_METHOD("get_error_message"), &PragmaOverlay::get_error_message);
+	}
 
 public:
+	int get_error_line() const { return error_line; }
+	String get_error_message() const { return error_message; }
+
 	void wrap_highlighter() {
 		Ref<SyntaxHighlighter> current = code->get_syntax_highlighter();
 		if (current.is_null() || !current->is_class("GDScriptSyntaxHighlighter")) {
@@ -271,9 +302,43 @@ public:
 		code->set_meta(OVERLAY_META, this);
 		set_anchors_and_offsets_preset(PRESET_FULL_RECT);
 		set_mouse_filter(MOUSE_FILTER_IGNORE);
+		timer = memnew(Timer);
+		timer->set_one_shot(true);
+		timer->set_wait_time(CHECK_DELAY_MS / 1000.0);
+		add_child(timer);
+		timer->connect("timeout", callable_mp(this, &PragmaOverlay::check));
 		code->connect("text_changed", callable_mp(this, &PragmaOverlay::on_text_changed));
+		code->connect("text_set", callable_mp(timer, &Timer::start).bind(-1.0));
 		code->connect("code_completion_requested", callable_mp(this, &PragmaOverlay::on_completion_requested));
+		code->connect("draw", callable_mp((CanvasItem *)this, &CanvasItem::queue_redraw));
 		wrap_highlighter();
+		check();
+	}
+
+	void _draw() override {
+		if (error_line < 0 || error_line >= code->get_line_count()) {
+			return;
+		}
+		const Color red(1.0, 0.35, 0.35);
+		String text = code->get_line(error_line);
+		int first = text.length() - text.lstrip(" \t").length();
+		int last = MAX(first, text.length() - 1);
+		Rect2i from = code->get_rect_at_line_column(error_line, first);
+		Rect2i to = code->get_rect_at_line_column(error_line, last);
+		if (from.position.x < 0 || to.position.x < 0) {
+			return;
+		}
+		PackedVector2Array wave;
+		int bottom = from.position.y + from.size.y - 1;
+		for (int x = from.position.x, i = 0; x <= to.position.x + to.size.x; x += 3, i++) {
+			wave.push_back(Vector2(x, bottom - (i % 2) * 2));
+		}
+		if (wave.size() > 1) {
+			draw_polyline(wave, red, 1.0);
+		}
+		Ref<Font> font = code->get_theme_font("font");
+		int size = code->get_theme_font_size("font_size");
+		draw_string(font, Vector2(to.position.x + to.size.x + 16, from.position.y + font->get_ascent(size)), error_message, HORIZONTAL_ALIGNMENT_LEFT, -1, size, red);
 	}
 };
 

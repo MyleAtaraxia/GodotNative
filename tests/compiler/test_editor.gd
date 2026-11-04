@@ -65,3 +65,13 @@ func test_suggestions_follow_the_cursor() -> void:
 	assert_eq(seen["#pragma omp parallel for reduction(+:to"], ["total"])
 	assert_has(seen["#pragma omp parallel for private("], "total")
 	assert_does_not_have(seen["var plain :="], "schedule(")
+
+
+func test_errors_mark_the_line_and_clear_when_fixed() -> void:
+	var errors: Dictionary = probe_editor()["errors"]
+	assert_eq(errors["pragma"]["line"], 7.0)
+	assert_string_contains(errors["pragma"]["message"], "shedule")
+	assert_eq(errors["code"]["line"], 10.0)
+	assert_string_contains(errors["code"]["message"], "must return a value")
+	assert_eq(errors["fixed"]["line"], -1.0)
+	assert_eq(errors["plain_script"]["line"], -1.0)

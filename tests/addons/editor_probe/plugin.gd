@@ -71,6 +71,23 @@ func suggestions() -> Dictionary:
 	return result
 
 
+func error_after(text: String) -> Dictionary:
+	code.text = text
+	await wait(0.7)
+	var overlay: Object = code.get_meta("godot_native_overlay")
+	return {"line": overlay.get_error_line(), "message": overlay.get_error_message()}
+
+
+func errors(good: String) -> Dictionary:
+	var bad_clause := good.replace("schedule(dynamic)", "shedule(dynamic)")
+	return {
+		"pragma": await error_after(bad_clause),
+		"code": await error_after(good.replace("return total", "return")),
+		"fixed": await error_after(good),
+		"plain_script": await error_after(bad_clause.replace("#pragma native\n", "")),
+	}
+
+
 func run() -> void:
 	await wait(1.0)
 	EditorInterface.edit_script(load(SOURCE))
@@ -79,5 +96,7 @@ func run() -> void:
 	var good := code.text
 	var result := {"highlighter": code.syntax_highlighter.get_class(), "colors": highlighting()}
 	result["suggestions"] = await suggestions()
+	code.text = good
+	result["errors"] = await errors(good)
 	FileAccess.open(OUTPUT, FileAccess.WRITE).store_string(JSON.stringify(result))
 	get_tree().quit()

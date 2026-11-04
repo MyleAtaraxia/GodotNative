@@ -212,7 +212,13 @@ public:
 		}
 		return r;
 	}
-	static bool evaluate(const std::string &expression, Variant &value) {
+	bool quiet = false;
+
+	bool evaluate(const std::string &expression, Variant &value) const {
+		if (quiet) {
+			value = int64_t(0);
+			return true;
+		}
 		Ref<GDScript> probe;
 		probe.instantiate();
 		probe->set_source_code(String("static func value():\n\treturn ") + expression.c_str() + "\n");
@@ -572,6 +578,24 @@ int run_with_popup(const PackedStringArray &args, const String &root, const Stri
 	return OS::get_singleton()->get_process_exit_code(pid);
 }
 
+class SourceClasses : public LiveClasses {
+	std::string path;
+	std::string source;
+
+public:
+	SourceClasses(const std::string &p_path, const std::string &p_source) :
+			path(p_path), source(p_source) {
+		quiet = true;
+	}
+	bool read(const std::string &file, std::string &text) const override {
+		if (file == path) {
+			text = source;
+			return true;
+		}
+		return LiveClasses::read(file, text);
+	}
+};
+
 bool uses_openmp = false;
 
 bool compile_native(const String &target, bool show_progress = false) {
@@ -702,6 +726,11 @@ public:
 };
 
 } // namespace godot
+
+gn::Output gn_check_source(const std::string &path, const std::string &source) {
+	SourceClasses classes(path, source);
+	return gn::transpile_project({ path }, { path }, {}, gn::Options(), classes);
+}
 
 void gn_register_editor() {
 	gn_register_pragma_editor();
