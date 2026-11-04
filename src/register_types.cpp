@@ -12,6 +12,7 @@ void gn_register_editor();
 void gn_editor_plugin();
 #endif
 void gn_register_hand_bench();
+void gn_pin_openmp();
 
 using namespace godot;
 
@@ -20,6 +21,7 @@ static Ref<NativeLoader> loader;
 static void initialize(ModuleInitializationLevel level) {
 	if (level == MODULE_INITIALIZATION_LEVEL_SCENE) {
 		gn_register_hand_bench();
+		gn_pin_openmp();
 	}
 #ifdef TOOLS_ENABLED
 	if (level == MODULE_INITIALIZATION_LEVEL_EDITOR) {

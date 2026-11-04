@@ -3,6 +3,7 @@
 #include <godot_cpp/classes/ref.hpp>
 #include <godot_cpp/classes/ref_counted.hpp>
 
+#include <atomic>
 #include <coroutine>
 #include <functional>
 #include <memory>
@@ -21,6 +22,16 @@ namespace gn {
 using namespace godot;
 
 struct Abort {};
+
+inline int64_t loop_count(int64_t from, int64_t to, int64_t step) {
+	if (step > 0) {
+		return to > from ? (to - from - 1) / step + 1 : 0;
+	}
+	if (step < 0) {
+		return to < from ? (from - to - 1) / -step + 1 : 0;
+	}
+	return 0;
+}
 
 struct Loc {
 	const char *file;

@@ -18,7 +18,12 @@ sources = Glob("src/*.cpp")
 if env["target"] == "editor":
     sources += Glob("src/editor/*.cpp")
 else:
-    sources += Glob(project + "/addons/godot_native/generated/*.cpp")
+    generated = Glob(project + "/addons/godot_native/generated/*.cpp")
+    sources += generated
+    # shortcut: OpenMP is only enabled on Windows and Linux, other platforms run parallel loops serially until their toolchains are set up
+    if env["platform"] in ("windows", "linux") and any("#pragma omp" in open(str(f), encoding="utf-8").read() for f in generated):
+        ours.Append(CCFLAGS=["/openmp:experimental"] if env.get("is_msvc") else ["-fopenmp"])
+        ours.Append(LINKFLAGS=[] if env.get("is_msvc") else ["-fopenmp"])
 
 ours.Default(ours.SharedLibrary(
     "{}/addons/godot_native/bin/godot_native{}{}".format(project, env["suffix"], env["SHLIBSUFFIX"]),

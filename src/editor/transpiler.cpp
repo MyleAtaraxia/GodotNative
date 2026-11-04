@@ -18,6 +18,7 @@ struct Tok {
 	TK k;
 	std::string s;
 	int line;
+	std::string omp = "";
 };
 
 struct InnerDecl {
@@ -46,6 +47,10 @@ std::string first_line(const std::string &src) {
 	return "";
 }
 
+bool omp_line(const std::string &src, size_t i) {
+	return src.compare(i, 11, "#pragma omp") == 0 || src.compare(i, 12, "#pragma end ") == 0;
+}
+
 std::vector<Tok> tokenize(const std::string &src) {
 	std::vector<Tok> out;
 	std::vector<int> indents{ 0 };
@@ -64,7 +69,7 @@ std::vector<Tok> tokenize(const std::string &src) {
 			if (i >= src.size()) {
 				break;
 			}
-			if (src[i] == '\n' || src[i] == '\r' || src[i] == '#') {
+			if (src[i] == '\n' || src[i] == '\r' || (src[i] == '#' && !omp_line(src, i))) {
 				while (i < src.size() && src[i] != '\n') {
 					i++;
 				}
@@ -106,8 +111,14 @@ std::vector<Tok> tokenize(const std::string &src) {
 		} else if (c == ' ' || c == '\t' || c == '\r') {
 			i++;
 		} else if (c == '#') {
+			size_t b = i;
 			while (i < src.size() && src[i] != '\n') {
 				i++;
+			}
+			if (omp_line(src, b) && (out.empty() || out.back().k == TK::NL || out.back().k == TK::Indent || out.back().k == TK::Dedent)) {
+				std::string text = src.substr(b, i - b);
+				text = text.compare(0, 12, "#pragma end ") == 0 ? "#pragma omp" + text.substr(7) : text;
+				out.push_back({ TK::Id, "#pragma omp", line, text.substr(0, text.find('#', 1)) });
 			}
 		} else if (isalpha((unsigned char)c) || c == '_') {
 			size_t b = i;
@@ -350,6 +361,28 @@ struct Local {
 	TypeRef ref;
 };
 
+struct OmpReduction {
+	std::string op;
+	std::string var;
+};
+
+struct OmpDirective {
+	std::string kind, name, threads, condition;
+	std::string schedule = "static";
+	bool nowait = false;
+	std::vector<OmpReduction> reductions;
+	std::vector<std::string> shared, privates, firstprivates;
+};
+
+struct OmpVars {
+	std::string opens, closes;
+};
+
+struct OmpState {
+	bool region = false, blocked = false, work = false, simd = false, tracking = false;
+	int loops = 0;
+};
+
 struct KnownMethod {
 	Ty base;
 	const char *name;
@@ -428,6 +461,9 @@ class Compiler {
 	std::set<std::string> warnings;
 
 	std::vector<std::map<std::string, Local>> scopes;
+	OmpState omp;
+	size_t omp_scope = 0;
+	std::set<std::string> omp_writes;
 	std::set<std::string> demoted;
 	const Fn *cur = nullptr;
 	std::string out;
@@ -1294,6 +1330,8 @@ class Compiler {
 		}
 		expect("(");
 		const Fn *saved_cur = cur;
+		OmpState saved_omp = omp;
+		omp = OmpState();
 		std::string saved_out;
 		saved_out.swap(out);
 		cur = &fn;
@@ -1356,6 +1394,7 @@ class Compiler {
 		body.swap(out);
 		out.swap(saved_out);
 		cur = saved_cur;
+		omp = saved_omp;
 		std::string code = "gn::lambda(owner, " + std::to_string(required) + ", " + std::to_string(index) + ", [=](const Variant **args, int argc) -> Variant {\n";
 		if (fn.coroutine) {
 			code += "auto run = std::make_shared<std::function<gn::Task()>>([=]() mutable -> gn::Task {\n" + head + body + "co_return Variant();\n});\nreturn gn::run((*run)(), run);\n})";
@@ -2023,7 +2062,7 @@ class Compiler {
 		bool packed = b.t == Ty::PF64 || b.t == Ty::PI64;
 		if ((packed || b.t == Ty::Arr) && b.lv) {
 			std::string idx = conv(i, Ty::Int, line);
-			idx = unsafe ? "gn::wrap(" + idx + ", " + b.c + ")" : "gn::index(" + idx + ", " + b.c + ".size(), " + L(line) + ")";
+			idx = omp.simd ? idx : unsafe ? "gn::wrap(" + idx + ", " + b.c + ")" : "gn::index(" + idx + ", " + b.c + ".size(), " + L(line) + ")";
 			if (packed) {
 				return { b.c + ".ptr()[" + idx + "]", b.t == Ty::PF64 ? Ty::Float : Ty::Int, "(" + b.c + ".ptrw()[" + idx + "] = %v)" };
 			}
@@ -2059,6 +2098,7 @@ class Compiler {
 		if (l.set.empty()) {
 			throw Err{ line, "cannot assign to this expression" };
 		}
+		omp_note_write(l);
 		if (!l.local.empty()) {
 			const Local *loc = find_local(l.local);
 			if (loc->weak && r.t != loc->t) {
@@ -2147,8 +2187,413 @@ class Compiler {
 		out += std::string(cty(ty)) + " l_" + n + " = " + v + ";\n";
 	}
 
-	void for_stmt() {
+	bool shared_array(const std::string &c) const {
+		if (c.size() < 3 || !std::all_of(c.begin(), c.end(), [](unsigned char x) { return isalnum(x) || x == '_'; })) {
+			return false;
+		}
+		for (size_t i = omp_scope; i < scopes.size(); i++) {
+			if (scopes[i].count(c.substr(2))) {
+				return false;
+			}
+		}
+		return c.compare(0, 2, "l_") == 0 || c.compare(0, 2, "m_") == 0;
+	}
+
+	void omp_note_write(const E &l) {
+		size_t write = l.set.find(".ptrw()[");
+		if (omp.tracking && write != std::string::npos && shared_array(l.set.substr(1, write - 1))) {
+			omp_writes.insert(l.set.substr(1, write - 1));
+		}
+	}
+
+	static std::vector<std::string> omp_list(const std::string &body) {
+		std::vector<std::string> names;
+		std::string name;
+		for (char c : body + ",") {
+			if (c == ',') {
+				if (!name.empty()) {
+					names.push_back(name);
+				}
+				name.clear();
+			} else if (c != ' ' && c != '\t') {
+				name += c;
+			}
+		}
+		return names;
+	}
+
+	static OmpDirective omp_parse(const std::string &text, int line) {
+		static const std::map<std::string, std::set<std::string>> allowed = {
+			{ "parallel for", { "shared", "private", "firstprivate", "reduction", "schedule", "num_threads", "if" } },
+			{ "parallel", { "shared", "private", "firstprivate", "reduction", "num_threads", "if" } },
+			{ "for", { "private", "firstprivate", "reduction", "schedule", "nowait" } },
+			{ "simd", { "private", "reduction" } },
+			{ "single", { "private", "firstprivate", "nowait" } },
+			{ "critical", {} },
+			{ "atomic", {} },
+			{ "barrier", {} },
+			{ "end parallel", {} },
+			{ "end critical", {} },
+			{ "end single", {} },
+		};
+		OmpDirective d;
+		size_t i = text.find_first_not_of(" \t", 11);
+		i = i == std::string::npos ? text.size() : i;
+		for (const auto &kind : allowed) {
+			const size_t size = kind.first.size();
+			if (size > d.kind.size() && text.compare(i, size, kind.first) == 0 && (i + size == text.size() || !isalnum((unsigned char)text[i + size]))) {
+				d.kind = kind.first;
+			}
+		}
+		if (d.kind.empty()) {
+			throw Err{ line, "unsupported OpenMP directive '" + text.substr(i) + "'" };
+		}
+		i += d.kind.size();
+		while ((i = text.find_first_not_of(" \t\r", i)) != std::string::npos) {
+			size_t end = std::min(text.find_first_of(" \t\r(", i), text.size());
+			std::string name = text.substr(i, end - i), body;
+			i = end;
+			size_t open = text.find_first_not_of(" \t", i);
+			if (open != std::string::npos && text[open] == '(') {
+				int depth = 0;
+				size_t close = open;
+				for (; close < text.size(); close++) {
+					depth += text[close] == '(';
+					depth -= text[close] == ')';
+					if (depth == 0) {
+						break;
+					}
+				}
+				if (close == text.size()) {
+					throw Err{ line, "unbalanced parentheses in '" + text + "'" };
+				}
+				body = text.substr(open + 1, close - open - 1);
+				i = close + 1;
+			}
+			if (d.kind == "critical" && name.empty()) {
+				std::vector<std::string> names = omp_list(body);
+				if (names.size() != 1 || !std::all_of(names[0].begin(), names[0].end(), [](unsigned char x) { return isalnum(x) || x == '_'; })) {
+					throw Err{ line, "unsupported OpenMP critical name '" + body + "'" };
+				}
+				d.name = names[0];
+				continue;
+			}
+			if (!allowed.at(d.kind).count(name)) {
+				throw Err{ line, "unsupported OpenMP clause '" + name + "' on " + d.kind };
+			}
+			if (name == "nowait") {
+				d.nowait = true;
+			} else if (name == "num_threads") {
+				d.threads = body;
+			} else if (name == "if") {
+				d.condition = body;
+			} else if (name == "shared") {
+				d.shared = omp_list(body);
+			} else if (name == "private") {
+				d.privates = omp_list(body);
+			} else if (name == "firstprivate") {
+				d.firstprivates = omp_list(body);
+			} else if (name == "schedule") {
+				std::vector<std::string> parts = omp_list(body);
+				if (parts.empty() || parts.size() > 2 || (parts[0] != "static" && parts[0] != "dynamic" && parts[0] != "guided") || (parts.size() == 2 && parts[1].find_first_not_of("0123456789") != std::string::npos)) {
+					throw Err{ line, "unsupported OpenMP schedule '" + body + "'" };
+				}
+				d.schedule = parts.size() == 2 ? parts[0] + ", " + parts[1] : parts[0];
+			} else {
+				size_t colon = body.find(':');
+				std::string op = omp_list(body.substr(0, colon)).empty() ? "" : omp_list(body.substr(0, colon))[0];
+				if (colon == std::string::npos || (op != "+" && op != "*" && op != "min" && op != "max")) {
+					throw Err{ line, "unsupported OpenMP reduction '" + body + "'" };
+				}
+				for (const std::string &var : omp_list(body.substr(colon + 1))) {
+					d.reductions.push_back({ op, var });
+				}
+			}
+		}
+		if (d.nowait && !d.reductions.empty()) {
+			throw Err{ line, "nowait cannot be used with reduction" };
+		}
+		return d;
+	}
+
+	const Local *omp_local(const std::string &name, int line) const {
+		const Local *l = find_local(name);
+		if (!l) {
+			throw Err{ line, "OpenMP clause needs a local variable, not '" + name + "'" };
+		}
+		return l;
+	}
+
+	const Local *omp_reduction(const std::string &name, int line) const {
+		const Local *l = find_local(name);
+		if (!l || (l->t != Ty::Int && l->t != Ty::Float)) {
+			throw Err{ line, "reduction needs a local int or float, not '" + name + "'" };
+		}
+		return l;
+	}
+
+	E omp_expr(const std::string &text, int line) {
+		std::vector<Tok> tokens = tokenize(text);
+		for (Tok &token : tokens) {
+			token.line = line;
+		}
+		t.swap(tokens);
+		auto at = p;
+		p = 0;
+		E e = expr();
+		t.swap(tokens);
+		p = at;
+		return e;
+	}
+
+	OmpVars omp_vars(const OmpDirective &d, int line) {
+		OmpVars v;
+		for (const std::string &name : d.shared) {
+			if (!find_local(name) && !find_member(name)) {
+				throw Err{ line, "shared needs a variable, not '" + name + "'" };
+			}
+		}
+		for (const std::string &name : d.privates) {
+			const Local *l = omp_local(name, line);
+			v.opens += std::string(cty(l->t)) + " " + l->c + "{};\n";
+		}
+		for (const std::string &name : d.firstprivates) {
+			const Local *l = omp_local(name, line);
+			std::string shared = temp(), type = cty(l->t);
+			out += type + " &" + shared + " = " + l->c + ";\n";
+			v.opens += type + " " + l->c + " = " + shared + ";\n";
+		}
+		for (const OmpReduction &r : d.reductions) {
+			const Local *l = omp_reduction(r.var, line);
+			std::string shared = temp(), first = temp(), type = cty(l->t);
+			out += type + " &" + shared + " = " + l->c + ";\nconst " + type + " " + first + " = " + shared + ";\n";
+			v.opens += type + " " + l->c + " = " + (r.op == "+" ? type + "(0)" : r.op == "*" ? type + "(1)" : first) + ";\n";
+			v.closes += r.op == "+" ? shared + " += " + l->c + ";\n" : r.op == "*" ? shared + " *= " + l->c + ";\n" : "if (" + l->c + (r.op == "min" ? " < " : " > ") + shared + ") { " + shared + " = " + l->c + "; }\n";
+		}
+		if (!v.closes.empty()) {
+			v.closes = "#pragma omp critical(gn_reduction)\n{\n" + v.closes + "}\n";
+		}
+		return v;
+	}
+
+	std::string omp_team(const OmpDirective &d, int line) {
+		std::string clauses;
+		if (!d.condition.empty()) {
+			E e = omp_expr(d.condition, line);
+			std::string c = temp();
+			out += "const bool " + c + " = " + truth(e) + ";\n";
+			clauses += " if(" + c + ")";
+		}
+		if (!d.threads.empty()) {
+			E e = omp_expr(d.threads, line);
+			std::string c = temp();
+			out += "const int " + c + " = int(" + conv(e, Ty::Int, line) + ");\n";
+			clauses += " num_threads(" + c + ")";
+		}
+		return clauses;
+	}
+
+	bool omp_track_writes(std::set<std::string> &saved) {
+		if (omp.tracking) {
+			return false;
+		}
+		saved.swap(omp_writes);
+		omp_scope = scopes.size();
+		omp.tracking = true;
+		return true;
+	}
+
+	void omp_detach_writes(bool outermost, size_t at, std::set<std::string> &saved) {
+		if (!outermost) {
+			return;
+		}
+		std::string detach;
+		for (const std::string &array : omp_writes) {
+			detach += "if (" + array + ".size() > 0) { " + array + ".ptrw(); }\n";
+		}
+		out.insert(at, detach);
+		omp_writes.swap(saved);
+	}
+
+	void omp_block(const std::string &kind, int line) {
+		std::string close = "end " + kind;
+		scopes.emplace_back();
+		for (;;) {
+			if (tk().k == TK::Dedent || tk().k == TK::Eof) {
+				throw Err{ line, "missing #pragma " + close };
+			}
+			if (is("#pragma omp") && omp_parse(tk().omp, ln()).kind == close) {
+				p++;
+				nl();
+				break;
+			}
+			stmt();
+		}
+		scopes.pop_back();
+	}
+
+	void omp_region(const OmpDirective &d, int line) {
+		if (cur->coroutine) {
+			throw Err{ line, "#pragma omp " + d.kind + " cannot be in a function that uses await" };
+		}
+		bool team = d.kind == "parallel";
+		std::string failed = temp();
+		out += "{\n" + std::string(team ? "std::atomic<bool> " + failed + "{ false }" : "bool " + failed + " = false") + ";\n";
+		OmpVars v = omp_vars(d, line);
+		std::string clauses = team ? omp_team(d, line) : d.nowait ? " nowait" : d.name.empty() ? "" : "(gn_" + d.name + ")";
+		size_t detach_at = out.size();
+		out += "#pragma omp " + d.kind + clauses + "\n{\n" + v.opens + "try {\n";
+		OmpState saved = omp;
+		std::set<std::string> saved_writes;
+		bool outermost = team && omp_track_writes(saved_writes);
+		omp.region = true;
+		omp.blocked = true;
+		omp.work = !team;
+		omp.loops = 0;
+		omp_block(d.kind, line);
+		out += "} catch (const gn::Abort &) { " + failed + " = true; }\n" + v.closes + "}\nif (" + failed + ") { throw gn::Abort{}; }\n}\n";
+		omp_detach_writes(outermost, detach_at, saved_writes);
+		omp = saved;
+	}
+
+	std::string omp_hoist(std::string &body) {
+		std::map<std::string, std::pair<std::string, bool>> arrays;
+		for (const char *access : { ".ptrw()[", ".ptr()[" }) {
+			for (size_t at = body.find(access); at != std::string::npos; at = body.find(access, at + 1)) {
+				size_t from = at;
+				while (from > 0 && (isalnum((unsigned char)body[from - 1]) || body[from - 1] == '_')) {
+					from--;
+				}
+				std::string array = body.substr(from, at - from);
+				if (shared_array(array) && !arrays.count(array)) {
+					arrays[array] = { temp(), strlen(access) == 8 };
+				}
+			}
+		}
+		std::string hoisted;
+		for (const auto &a : arrays) {
+			hoisted += "auto *" + a.second.first + " = " + a.first + ".size() > 0 ? " + a.first + (a.second.second ? ".ptrw()" : ".ptr()") + " : nullptr;\n";
+			for (const char *access : { ".ptrw()[", ".ptr()[" }) {
+				const std::string from = a.first + access, to = a.second.first + "[";
+				for (size_t at = body.find(from); at != std::string::npos; at = body.find(from, at + to.size())) {
+					if (at == 0 || !(isalnum((unsigned char)body[at - 1]) || body[at - 1] == '_')) {
+						body.replace(at, from.size(), to);
+					}
+				}
+			}
+		}
+		return hoisted;
+	}
+
+	void omp_loop(const OmpDirective &d, const std::string &n, const std::string &from, const std::string &to, const std::string &step, int line) {
+		if (cur->coroutine) {
+			throw Err{ line, "a parallel loop cannot be in a function that uses await" };
+		}
+		if (omp.work && d.kind != "parallel for") {
+			throw Err{ line, "#pragma omp " + d.kind + " cannot be nested inside for, single or critical" };
+		}
+		bool simd = d.kind == "simd", team = d.kind == "parallel for";
+		std::string start = temp(), stride = temp(), count = temp(), failed = temp(), k = temp();
+		out += "{ const int64_t " + start + " = " + from + "; const int64_t " + stride + " = " + step + "; const int64_t " + count + " = gn::loop_count(" + start + ", " + to + ", " + stride + ");\n";
+		std::string loop = "for (int64_t " + k + " = 0; " + k + " < " + count + "; " + k + "++) {\n";
+		OmpState saved = omp;
+		omp.region = true;
+		omp.blocked = false;
+		omp.work = true;
+		omp.loops = 0;
+		if (simd) {
+			std::string clauses;
+			for (const std::string &name : d.privates) {
+				clauses += " private(" + omp_local(name, line)->c + ")";
+			}
+			for (const OmpReduction &r : d.reductions) {
+				clauses += " reduction(" + r.op + ":" + omp_reduction(r.var, line)->c + ")";
+			}
+			size_t saved_scope = omp_scope, at = out.size();
+			omp_scope = scopes.size();
+			omp.simd = true;
+			scopes.emplace_back();
+			declare(n, Ty::Int, false, "");
+			out += "int64_t l_" + n + " = " + start + " + " + k + " * " + stride + ";\n";
+			block();
+			std::string body = out.substr(at);
+			out.erase(at);
+			out += omp_hoist(body) + "#pragma omp simd" + clauses + "\n" + loop + body + "}\n}\n";
+			scopes.pop_back();
+			omp_scope = saved_scope;
+			omp = saved;
+			return;
+		}
+		out += "std::atomic<bool> " + failed + "{ false };\n";
+		OmpVars v = omp_vars(d, line);
+		std::string clauses = team ? omp_team(d, line) : "";
+		size_t detach_at = out.size();
+		std::set<std::string> saved_writes;
+		bool outermost = team && omp_track_writes(saved_writes);
+		out += team ? "#pragma omp parallel" + clauses + "\n{\n" : "{\n";
+		out += v.opens + "#pragma omp for schedule(" + d.schedule + ")" + (d.nowait ? " nowait" : "") + "\n" + loop;
+		out += "if (" + failed + ".load(std::memory_order_relaxed)) { continue; }\ntry {\n";
+		scopes.emplace_back();
+		declare(n, Ty::Int, false, "");
+		out += "int64_t l_" + n + " = " + start + " + " + k + " * " + stride + ";\n";
+		block();
+		scopes.pop_back();
+		out += "} catch (const gn::Abort &) { " + failed + " = true; }\n}\n" + v.closes + "}\nif (" + failed + ") { throw gn::Abort{}; }\n}\n";
+		omp_detach_writes(outermost, detach_at, saved_writes);
+		omp = saved;
+	}
+
+	void omp_atomic() {
 		int line = ln();
+		E l = expr();
+		static const std::set<std::string> ops = { "+=", "-=", "*=", "&=", "|=", "^=" };
+		if (tk().k != TK::Op || !ops.count(tk().s)) {
+			throw Err{ line, "#pragma omp atomic needs a statement like 'x += y'" };
+		}
+		std::string op = t[p++].s;
+		E r = expr();
+		nl();
+		const std::string tail = " = %v)";
+		bool lvalue = l.set.size() > tail.size() && l.set[0] == '(' && l.set.compare(l.set.size() - tail.size(), tail.size(), tail) == 0;
+		bool bitwise = op == "&=" || op == "|=" || op == "^=";
+		if (!lvalue || (l.t != Ty::Int && (l.t != Ty::Float || bitwise))) {
+			throw Err{ line, "#pragma omp atomic needs an int or float variable or packed array element" };
+		}
+		omp_note_write(l);
+		std::string v = temp();
+		out += "{ const " + std::string(cty(l.t)) + " " + v + " = " + conv(r, l.t, line) + ";\n#pragma omp atomic\n" + l.set.substr(1, l.set.size() - tail.size() - 1) + " " + op + " " + v + ";\n}\n";
+	}
+
+	void omp_stmt() {
+		int line = ln();
+		OmpDirective d = omp_parse(tk().omp, line);
+		p++;
+		nl();
+		if (omp.simd) {
+			throw Err{ line, "a simd loop cannot contain #pragma omp directives" };
+		}
+		if (d.kind.compare(0, 4, "end ") == 0) {
+			throw Err{ line, "#pragma " + d.kind + " has no matching start" };
+		}
+		if ((d.kind == "barrier" || d.kind == "single") && omp.work) {
+			throw Err{ line, "#pragma omp " + d.kind + " cannot be nested inside for, single or critical" };
+		}
+		if (d.kind == "barrier") {
+			out += "#pragma omp barrier\n";
+		} else if (d.kind == "atomic") {
+			omp_atomic();
+		} else if (d.kind == "parallel" || d.kind == "critical" || d.kind == "single") {
+			omp_region(d, line);
+		} else if (!eat("for")) {
+			throw Err{ line, "#pragma omp " + d.kind + " must come right before a for loop" };
+		} else {
+			for_stmt(&d);
+		}
+	}
+
+	void for_stmt(const OmpDirective *directive = nullptr) {
+		int line = ln();
+		std::string parallel_from, parallel_to, parallel_step;
 		std::string n = ident();
 		if (eat(":")) {
 			parse_type();
@@ -2166,6 +2611,9 @@ class Compiler {
 			std::string from = a.size() > 1 ? conv(a[0], Ty::Int, line) : "int64_t(0)";
 			std::string to = conv(a[a.size() > 1 ? 1 : 0], Ty::Int, line);
 			std::string step = a.size() > 2 ? conv(a[2], Ty::Int, line) : "int64_t(1)";
+			parallel_from = from;
+			parallel_to = to;
+			parallel_step = step;
 			std::string i = temp(), e = temp(), s = temp();
 			open = "{ const int64_t " + e + " = " + to + "; const int64_t " + s + " = " + step + ";\nfor (int64_t " + i + " = " + from + "; " + s + " > 0 ? " + i + " < " + e + " : (" + s + " < 0 && " + i + " > " + e + "); " + i + " += " + s + ") {\n";
 			v = i;
@@ -2173,6 +2621,9 @@ class Compiler {
 			E e = expr();
 			std::string i = temp(), c = temp();
 			if (e.t == Ty::Int) {
+				parallel_from = "int64_t(0)";
+				parallel_to = e.c;
+				parallel_step = "int64_t(1)";
 				open = "{ const int64_t " + c + " = " + e.c + ";\nfor (int64_t " + i + " = 0; " + i + " < " + c + "; " + i + "++) {\n";
 				v = i;
 			} else if (e.t == Ty::PF64 || e.t == Ty::PI64 || e.t == Ty::Arr) {
@@ -2186,11 +2637,20 @@ class Compiler {
 			}
 		}
 		expect(":");
+		if (directive) {
+			if (parallel_to.empty()) {
+				throw Err{ line, "a parallel loop needs range() or an int count" };
+			}
+			omp_loop(*directive, n, parallel_from, parallel_to, parallel_step, line);
+			return;
+		}
 		out += open;
 		scopes.emplace_back();
 		declare(n, each, false, "");
 		out += std::string(cty(each)) + " l_" + n + " = " + v + ";\n";
+		omp.loops++;
 		block();
+		omp.loops--;
 		scopes.pop_back();
 		out += "} }\n";
 	}
@@ -2317,6 +2777,10 @@ class Compiler {
 
 	void stmt() {
 		int line = ln();
+		if (is("#pragma omp")) {
+			omp_stmt();
+			return;
+		}
 		if (is("@")) {
 			if (t[p + 1].s.rfind("warning_ignore", 0) != 0) {
 				throw Err{ line, "annotation @" + t[p + 1].s + " is not supported on a statement" };
@@ -2349,6 +2813,7 @@ class Compiler {
 			expect(":");
 			std::string hoisted = out.substr(mark);
 			out.erase(mark);
+			omp.loops++;
 			if (hoisted.empty()) {
 				out += "while (" + truth(c) + ") ";
 				block();
@@ -2357,19 +2822,29 @@ class Compiler {
 				block();
 				out += "}\n";
 			}
+			omp.loops--;
 			return;
 		}
 		if (eat("break")) {
+			if (omp.region && omp.loops == 0) {
+				throw Err{ line, "a parallel loop or block cannot use break" };
+			}
 			nl();
 			out += "break;\n";
 			return;
 		}
 		if (eat("continue")) {
+			if (omp.blocked && omp.loops == 0) {
+				throw Err{ line, "a parallel block cannot use continue" };
+			}
 			nl();
 			out += "continue;\n";
 			return;
 		}
 		if (eat("return")) {
+			if (omp.region) {
+				throw Err{ line, "a parallel loop or block cannot use return" };
+			}
 			if (tk().k == TK::NL) {
 				if (cur->declared != Ty::Var && cur->declared != Ty::Void) {
 					throw Err{ line, "function '" + cur->name + "' must return a value" };
@@ -3036,6 +3511,8 @@ class Compiler {
 			try {
 				cur = &f;
 				lambda_inline = 0;
+				omp = OmpState();
+				omp_writes.clear();
 				out.clear();
 				tmp = 0;
 				scopes.clear();

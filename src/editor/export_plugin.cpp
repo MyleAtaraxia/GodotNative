@@ -24,6 +24,7 @@
 #include <godot_cpp/core/class_db.hpp>
 #include <godot_cpp/variant/utility_functions.hpp>
 
+#include <algorithm>
 #include <map>
 #include <set>
 
@@ -571,6 +572,8 @@ int run_with_popup(const PackedStringArray &args, const String &root, const Stri
 	return OS::get_singleton()->get_process_exit_code(pid);
 }
 
+bool uses_openmp = false;
+
 bool compile_native(const String &target, bool show_progress = false) {
 	DirAccess::make_dir_recursive_absolute(GENERATED_DIR);
 	Ref<FileAccess> ignore = FileAccess::open(String(GENERATED_DIR).path_join(".gdignore"), FileAccess::WRITE);
@@ -597,6 +600,7 @@ bool compile_native(const String &target, bool show_progress = false) {
 	options.addon_errors = int_setting("errors/addon_scripts", options.addon_errors);
 	options.untyped = int_setting("warnings/untyped_code", options.untyped);
 	gn::Output r = gn::transpile_project(toggled, all, embedded, options, classes);
+	uses_openmp = std::any_of(r.files.begin(), r.files.end(), [](const auto &f) { return f.second.find("#pragma omp") != std::string::npos; });
 	for (const std::string &f : r.fallback) {
 		UtilityFunctions::push_warning("[GodotNative] running interpreted: ", f.c_str());
 	}
@@ -651,6 +655,11 @@ public:
 		// shortcut: a failure reports an export error and ships no library, but the export still writes its files because _export_begin cannot abort. Upgrade once a real export hook exists for this.
 		String target = is_debug ? "template_debug" : "template_release";
 		if (compile_native(target)) {
+			// shortcut: only MSVC's runtime is shipped, and from System32, MinGW's libgomp needs adding when that toolchain is supported
+			String runtime = OS::get_singleton()->get_environment("WINDIR").path_join("System32/vcomp140.dll");
+			if (uses_openmp && FileAccess::file_exists(runtime)) {
+				add_shared_object(runtime, PackedStringArray(), "");
+			}
 			return;
 		}
 		DirAccess::remove_absolute(library_path(target));

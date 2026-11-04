@@ -28,6 +28,9 @@ makes Godot compile a GDScript copy, and the test would no longer run native.
 
 `compiler/` runs a real export per case and needs SCons on the path.
 
+`unit/test_parallel.gd` covers `#pragma omp`. Interpreted runs ignore the
+directives, so its code must give the same result on one thread.
+
 `fallback/` checks API newer than the compiled one. It needs Godot 4.7 with
 `GODOT_NATIVE_API=4.4` set, which compiles against the older API on purpose:
 
