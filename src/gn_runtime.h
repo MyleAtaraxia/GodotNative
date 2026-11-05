@@ -21,6 +21,7 @@
 #include <godot_cpp/variant/variant_internal.hpp>
 
 #include <cstdint>
+#include <cstring>
 #include <initializer_list>
 #include <type_traits>
 
@@ -163,7 +164,66 @@ struct Registrar {
 };
 
 [[noreturn]] void fail(const char *msg, const Loc &loc);
-Variant op(Variant::Operator o, const Variant &a, const Variant &b, const Loc &loc);
+
+// shortcut: reads the engine's Variant layout (type at 0, payload at 8, object id at 8 and pointer at 16), the 4.4 and 4.7 suites cover it, recheck if a Godot version changes Variant
+template <typename T>
+inline T raw_read(const Variant &v, size_t offset = 8) {
+	T r;
+	std::memcpy(&r, reinterpret_cast<const uint8_t *>(v._native_ptr()) + offset, sizeof(T));
+	return r;
+}
+
+inline int32_t raw_type(const Variant &v) {
+	return raw_read<int32_t>(v, 0);
+}
+
+template <typename T>
+inline Variant raw_make(Variant::Type type, const T &value) {
+	Variant r;
+	int32_t tag = type;
+	std::memcpy(r._native_ptr(), &tag, sizeof(tag));
+	std::memcpy(reinterpret_cast<uint8_t *>(r._native_ptr()) + 8, &value, sizeof(T));
+	return r;
+}
+
+Variant evaluate(Variant::Operator o, const Variant &a, const Variant &b, const Loc &loc);
+
+inline Variant op(Variant::Operator o, const Variant &a, const Variant &b, const Loc &loc) {
+	int32_t ta = raw_type(a), tb = raw_type(b);
+	if (ta == Variant::INT && tb == Variant::INT) {
+		int64_t x = raw_read<int64_t>(a), y = raw_read<int64_t>(b);
+		switch (o) {
+			case Variant::OP_ADD: return raw_make(Variant::INT, int64_t(uint64_t(x) + uint64_t(y)));
+			case Variant::OP_SUBTRACT: return raw_make(Variant::INT, int64_t(uint64_t(x) - uint64_t(y)));
+			case Variant::OP_MULTIPLY: return raw_make(Variant::INT, int64_t(uint64_t(x) * uint64_t(y)));
+			case Variant::OP_LESS: return raw_make(Variant::BOOL, x < y);
+			case Variant::OP_GREATER: return raw_make(Variant::BOOL, x > y);
+			case Variant::OP_LESS_EQUAL: return raw_make(Variant::BOOL, x <= y);
+			case Variant::OP_GREATER_EQUAL: return raw_make(Variant::BOOL, x >= y);
+			case Variant::OP_EQUAL: return raw_make(Variant::BOOL, x == y);
+			case Variant::OP_NOT_EQUAL: return raw_make(Variant::BOOL, x != y);
+			default: break;
+		}
+	} else if ((ta == Variant::INT || ta == Variant::FLOAT) && (tb == Variant::INT || tb == Variant::FLOAT)) {
+		double x = ta == Variant::INT ? double(raw_read<int64_t>(a)) : raw_read<double>(a);
+		double y = tb == Variant::INT ? double(raw_read<int64_t>(b)) : raw_read<double>(b);
+		switch (o) {
+			case Variant::OP_ADD: return raw_make(Variant::FLOAT, x + y);
+			case Variant::OP_SUBTRACT: return raw_make(Variant::FLOAT, x - y);
+			case Variant::OP_MULTIPLY: return raw_make(Variant::FLOAT, x * y);
+			case Variant::OP_DIVIDE: return raw_make(Variant::FLOAT, x / y);
+			case Variant::OP_LESS: return raw_make(Variant::BOOL, x < y);
+			case Variant::OP_GREATER: return raw_make(Variant::BOOL, x > y);
+			case Variant::OP_LESS_EQUAL: return raw_make(Variant::BOOL, x <= y);
+			case Variant::OP_GREATER_EQUAL: return raw_make(Variant::BOOL, x >= y);
+			case Variant::OP_EQUAL: return raw_make(Variant::BOOL, x == y);
+			case Variant::OP_NOT_EQUAL: return raw_make(Variant::BOOL, x != y);
+			default: break;
+		}
+	}
+	return evaluate(o, a, b, loc);
+}
+
 Variant mcall(const Variant &base, const StringName &name, std::initializer_list<Variant> args, const Loc &loc);
 Variant get_named(const Variant &base, const StringName &name, const Loc &loc);
 Variant get_index(const Variant &base, const Variant &index, const Loc &loc);
@@ -184,8 +244,27 @@ Object *script_object(const char *path);
 Variant static_call(GDExtensionMethodBindPtr mb, std::initializer_list<Variant> args, const Loc &loc);
 Variant dynamic_static(const char *cls, const char *name, std::initializer_list<Variant> args);
 GDExtensionMethodBindPtr method_bind(const char *cls, const char *name, int64_t hash);
-void *raw_object(const Variant &v);
-void *live_object(const Variant &v, const Loc &loc);
+
+inline void *raw_object(const Variant &v) {
+	return raw_read<void *>(v, 16);
+}
+
+inline bool is_instance_valid(const Variant &v) {
+	if (raw_type(v) != Variant::OBJECT) {
+		return false;
+	}
+	uint64_t id = raw_read<uint64_t>(v);
+	bool counted = id >> 63;
+	return id != 0 && (counted || gdextension_interface::object_get_instance_from_id(id) != nullptr);
+}
+
+inline void *live_object(const Variant &v, const Loc &loc) {
+	if (!is_instance_valid(v)) {
+		fail(v.get_type() == Variant::NIL ? "Cannot call a method on a null value." : "Cannot call a method on a previously freed instance.", loc);
+	}
+	return raw_object(v);
+}
+
 Variant builtin_static(Variant::Type type, const StringName &method, std::initializer_list<Variant> args, const Loc &loc);
 Variant builtin_constant(Variant::Type type, const StringName &name);
 Variant check_builtin(const Variant &v, Variant::Type type, const Loc &loc);
@@ -211,7 +290,6 @@ int64_t ord(const String &s);
 Variant color8(int64_t r, int64_t g, int64_t b, int64_t a);
 Variant instance_from_id(int64_t id);
 bool is_instance_of(const Variant &v, const Variant &type);
-bool is_instance_valid(const Variant &v);
 bool type_exists(const StringName &name);
 
 inline int64_t add(int64_t a, int64_t b) { return int64_t(uint64_t(a) + uint64_t(b)); }
@@ -247,7 +325,15 @@ inline int64_t index(int64_t i, int64_t size, const Loc &loc) {
 }
 
 template <typename T>
+inline constexpr bool in_variant = std::is_same_v<T, bool> || std::is_same_v<T, int64_t> || std::is_same_v<T, double> || std::is_same_v<T, Vector2> || std::is_same_v<T, Vector3>;
+
+template <typename T>
 inline T cast(const Variant &v, Variant::Type t, const Loc &loc) {
+	if constexpr (in_variant<T>) {
+		if (raw_type(v) == t) {
+			return raw_read<T>(v);
+		}
+	}
 	Variant::Type got = v.get_type();
 	bool numeric = (t == Variant::INT || t == Variant::FLOAT) && (got == Variant::INT || got == Variant::FLOAT);
 	if (got != t && !numeric && !Variant::can_convert_strict(got, t)) {

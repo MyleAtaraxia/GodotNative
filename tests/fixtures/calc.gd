@@ -56,3 +56,19 @@ func grade(score: int) -> String:
 		0:
 			return "none"
 	return "some"
+
+
+func dynamic_numbers(a: Variant, b: Variant) -> Array:
+	return [a + b, a - b, a * b, a < b, a > b, a <= b, a >= b, a == b, a != b]
+
+
+func dynamic_divide(a: Variant, b: Variant) -> Variant:
+	return a / b
+
+
+func dynamic_overflow(a: Variant, b: Variant) -> Variant:
+	return a + b
+
+
+func dynamic_text(a: Variant, b: Variant) -> Variant:
+	return a + b

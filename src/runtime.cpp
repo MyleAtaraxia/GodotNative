@@ -250,7 +250,7 @@ void fail(const char *msg, const Loc &loc) {
 	throw Abort{};
 }
 
-Variant op(Variant::Operator o, const Variant &a, const Variant &b, const Loc &loc) {
+Variant evaluate(Variant::Operator o, const Variant &a, const Variant &b, const Loc &loc) {
 	Variant r;
 	bool valid = false;
 	Variant::evaluate(o, a, b, r, valid);
@@ -341,20 +341,6 @@ Variant dynamic_static(const char *cls, const char *name, std::initializer_list<
 		list.push_back(a);
 	}
 	return ClassDBSingleton::get_singleton()->callv("class_call_static", list);
-}
-
-void *raw_object(const Variant &v) {
-	static const GDExtensionTypeFromVariantConstructorFunc read = gdextension_interface::get_variant_to_type_constructor(GDEXTENSION_VARIANT_TYPE_OBJECT);
-	GDExtensionObjectPtr o = nullptr;
-	read(&o, const_cast<Variant &>(v)._native_ptr());
-	return o;
-}
-
-void *live_object(const Variant &v, const Loc &loc) {
-	if (!is_instance_valid(v)) {
-		fail(v.get_type() == Variant::NIL ? "Cannot call a method on a null value." : "Cannot call a method on a previously freed instance.", loc);
-	}
-	return raw_object(v);
 }
 
 class Resume : public CallableCustom {
@@ -720,14 +706,6 @@ Variant instance_from_id(int64_t id) {
 
 bool type_exists(const StringName &name) {
 	return ClassDBSingleton::get_singleton()->class_exists(name);
-}
-
-bool is_instance_valid(const Variant &v) {
-	static const GDExtensionPtrUtilityFunction fn = gdextension_interface::variant_get_ptr_utility_function(GN_SN("is_instance_valid")._native_ptr(), 996128841);
-	bool r = false;
-	const void *args[] = { v._native_ptr() };
-	fn(&r, args, 1);
-	return r;
 }
 
 bool is_instance_of(const Variant &v, const Variant &type) {

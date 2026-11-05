@@ -49,3 +49,15 @@ func test_match() -> void:
 	assert_eq(calc.grade(100), "perfect")
 	assert_eq(calc.grade(0), "none")
 	assert_eq(calc.grade(50), "some")
+
+
+func test_untyped_number_operators() -> void:
+	assert_eq(calc.dynamic_numbers(7, 2), [9, 5, 14, false, true, false, true, false, true])
+	assert_eq(calc.dynamic_numbers(7, 2.5), [9.5, 4.5, 17.5, false, true, false, true, false, true])
+	assert_eq(calc.dynamic_numbers(2.5, 7), [9.5, -4.5, 17.5, true, false, true, false, false, true])
+	assert_eq(calc.dynamic_divide(7, 2), 3)
+	assert_eq(calc.dynamic_divide(7, 2.0), 3.5)
+	assert_eq(calc.dynamic_divide(1.0, 0.0), INF)
+	assert_eq(calc.dynamic_overflow(9223372036854775807, 1), -9223372036854775808)
+	assert_eq(calc.dynamic_text("a", "b"), "ab")
+	assert_true(calc.dynamic_numbers(1, 1.0)[7])
