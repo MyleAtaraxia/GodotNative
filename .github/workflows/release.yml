@@ -32,6 +32,8 @@ jobs:
           mkdir -p .ci/godot
           curl -fsSL -o .ci/godot.zip "https://github.com/godotengine/godot-builds/releases/download/4.7.2-stable/Godot_v4.7.2-stable_win64.exe.zip"
           unzip -q .ci/godot.zip -d .ci/godot
+      - name: Use the latest GDProgress
+        run: git submodule update --remote demo/addons/godot_native/GDProgress
       - name: Package addon
         run: |
           addon=package/addons/godot_native

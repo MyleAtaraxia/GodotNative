@@ -4,3 +4,4 @@
 [submodule "GDProgress"]
 	path = demo/addons/godot_native/GDProgress
 	url = https://github.com/MyleAtaraxia/GDProgress.git
+	branch = master
