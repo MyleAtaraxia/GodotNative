@@ -106,6 +106,9 @@ std::vector<Tok> tokenize(const std::string &src) {
 			i++;
 		} else if (c == ' ' || c == '\t' || c == '\r') {
 			i++;
+		} else if (c == '\\' && (src.compare(i + 1, 1, "\n") == 0 || src.compare(i + 1, 2, "\r\n") == 0)) {
+			i = src.find('\n', i) + 1;
+			line++;
 		} else if (c == '#') {
 			size_t b = i;
 			while (i < src.size() && src[i] != '\n') {
@@ -125,7 +128,7 @@ std::vector<Tok> tokenize(const std::string &src) {
 			if (parens > 0 && out.back().s == "func") {
 				pending_lambdas.push_back(parens);
 			}
-		} else if (isdigit((unsigned char)c)) {
+		} else if (isdigit((unsigned char)c) || (c == '.' && i + 1 < src.size() && isdigit((unsigned char)src[i + 1]))) {
 			std::string n;
 			bool flt = false;
 			if (c == '0' && i + 1 < src.size() && (src[i + 1] == 'x' || src[i + 1] == 'X')) {
@@ -833,6 +836,12 @@ class Compiler {
 		}
 		if (e.t == Ty::Float && to == Ty::Int) {
 			return "int64_t(" + e.c + ")";
+		}
+		if (numeric(e.t) && to == Ty::Bool) {
+			return truth(e);
+		}
+		if (e.t == Ty::Bool && numeric(to)) {
+			return std::string(cty(to)) + "(" + e.c + ")";
 		}
 		if (e.t == Ty::Var) {
 			if (unsafe) {
@@ -1621,7 +1630,7 @@ class Compiler {
 		if (c != ctors.end()) {
 			p += 2;
 			std::vector<E> a = args();
-			bool vector = c->second == Ty::V3 || c->second == Ty::V2;
+			bool vector = (c->second == Ty::V3 || c->second == Ty::V2) && a.size() != 1;
 			if (!vector && !a.empty()) {
 				r = { unbox(std::string("gn::construct(Variant::") + vty(c->second) + ", {" + var_args(a, line) + "}, " + L(line) + ")", cty(c->second)), c->second };
 				return true;
@@ -1637,6 +1646,20 @@ class Compiler {
 		if (b != builtin_ctors().end()) {
 			p += 2;
 			std::vector<E> a = args();
+			static const std::map<std::string, std::pair<std::string, size_t>> numbers = { { "Color", { "float", 4 } }, { "Vector2i", { "int32_t", 2 } }, { "Vector3i", { "int32_t", 3 } }, { "Vector4i", { "int32_t", 4 } }, { "Vector4", { "real_t", 4 } }, { "Rect2", { "real_t", 4 } }, { "Rect2i", { "int32_t", 4 } }, { "Plane", { "real_t", 4 } }, { "Quaternion", { "real_t", 4 } } };
+			auto direct = numbers.find(n);
+			bool typed = direct != numbers.end() && (a.size() == direct->second.second || (n == "Color" && a.size() == 3));
+			for (const E &e : a) {
+				typed = typed && numeric(e.t);
+			}
+			if (typed) {
+				std::string list;
+				for (const E &e : a) {
+					list += (list.empty() ? "" : ", ") + direct->second.first + "(" + e.c + ")";
+				}
+				r = { "Variant(" + n + "(" + list + "))", Ty::Var };
+				return true;
+			}
 			r = { "gn::construct(Variant::" + b->second + ", {" + var_args(a, line) + "}, " + L(line) + ")", Ty::Var };
 			return true;
 		}
@@ -1661,7 +1684,7 @@ class Compiler {
 			}
 			case TK::Str:
 				p++;
-				return { "String(\"" + tok.s + "\")", Ty::Str };
+				return { "GN_STR(\"" + tok.s + "\")", Ty::Str };
 			case TK::Op:
 				if (eat("(")) {
 					E e = expr();
@@ -1808,6 +1831,11 @@ class Compiler {
 			p++;
 			return { "gn::load(String(\"" + class_path(n) + "\"))", Ty::Var };
 		}
+		bool bare_global = !(t[p + 1].k == TK::Op && (t[p + 1].s == "." || t[p + 1].s == "("));
+		if (bare_global && !find_local(n) && !find_member(n) && !find_const(n) && !classes.global_class_path(n).empty()) {
+			p++;
+			return { "gn::load(String(\"" + classes.global_class_path(n) + "\"))", Ty::Var };
+		}
 		bool dotted = t[p + 1].k == TK::Op && t[p + 1].s == "." && !find_local(n) && !find_member(n) && !find_const(n);
 		if (dotted) {
 			const std::string m = t[p + 2].s;
@@ -1876,6 +1904,10 @@ class Compiler {
 				E e{ "GN_SINGLETON(\"" + n + "\")", Ty::Var };
 				e.ref.cls = n;
 				return e;
+			}
+			if (t[p + 3].s == "." && classes.int_constant(n, t[p + 4].s, value)) {
+				p += 5;
+				return { "int64_t(" + std::to_string(value) + "LL)", Ty::Int };
 			}
 			throw Err{ line, "static member " + n + "." + m + " is not supported" };
 		}
@@ -1954,7 +1986,7 @@ class Compiler {
 			return { "Variant(Callable(owner, GN_SN(\"" + n + "\")))", Ty::Var };
 		}
 		int64_t value = 0;
-		if (classes.global_constant(n, value)) {
+		if (classes.int_constant(native(), n, value) || classes.global_constant(n, value)) {
 			return { "int64_t(" + std::to_string(value) + "LL)", Ty::Int };
 		}
 		throw Err{ line, "unknown identifier " + n };
@@ -3301,7 +3333,9 @@ class Compiler {
 				nl();
 			} else if (eat("class_name")) {
 				global = ident();
-				nl();
+				if (!is("extends")) {
+					nl();
+				}
 			} else if (eat("const")) {
 				Member m;
 				m.name = ident();
@@ -3452,13 +3486,13 @@ class Compiler {
 			}
 			Ty ty = m.declared ? m.t : e.t;
 			std::string value = conv(e, ty, m.line);
-			if ((ty == Ty::Int || ty == Ty::Float || ty == Ty::Bool) && value.find("()") == std::string::npos) {
+			if ((ty == Ty::Int || ty == Ty::Float || ty == Ty::Bool) && value.find("()") == std::string::npos && value.find("::") == std::string::npos) {
 				out += std::string("\tstatic inline const ") + cty(ty) + " k_" + id + " = " + value + ";\n";
 				consts[m.name] = { "k_" + id, ty };
 				continue;
 			}
 			out += std::string("\tstatic const ") + cty(ty) + " &k_" + id + "();\n";
-			const_defs += std::string("const ") + cty(ty) + " &C::k_" + id + "() {\n\tstatic const " + cty(ty) + " *v = new " + cty(ty) + "(" + value + ");\n\treturn *v;\n}\n\n";
+			const_defs += std::string("const ") + cty(ty) + " &C::k_" + id + "() {\n\tstatic const " + cty(ty) + " *v = gn::keep(new " + cty(ty) + "(" + value + "));\n\treturn *v;\n}\n\n";
 			consts[m.name] = { "k_" + id + "()", ty };
 		}
 		unsafe = checked;
@@ -3637,6 +3671,9 @@ public:
 			}
 			if (f.async_shape != up->async_shape) {
 				f.async_shape = up->async_shape = true;
+				f.ret = up->ret = Ty::Var;
+			}
+			if (up->ret != f.ret && (!up->annotated || !f.annotated)) {
 				f.ret = up->ret = Ty::Var;
 			}
 			bool same = up->ret == f.ret && up->params.size() == f.params.size();

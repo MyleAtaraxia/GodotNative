@@ -8,6 +8,8 @@
 #include <godot_cpp/core/error_macros.hpp>
 
 #include <cstring>
+#include <malloc.h>
+#include <mutex>
 #include <vector>
 
 using namespace godot;
@@ -38,6 +40,19 @@ struct Instance {
 	void *data;
 };
 
+// Script objects carry a script instance of their own for statics, whose data is the NativeScript and not an Instance.
+bool is_native_script(void *object) {
+	static void *script_tag = gdextension_interface::classdb_get_class_tag(NativeScript::get_class_static()._native_ptr());
+	return gdextension_interface::object_cast_to(object, script_tag) != nullptr;
+}
+
+Instance *native_instance(void *object) {
+	if (!object || is_native_script(object)) {
+		return nullptr;
+	}
+	return (Instance *)gdextension_interface::object_get_script_instance(object, NativeLanguage::singleton->_owner);
+}
+
 GDExtensionBool i_set(void *self, const void *name, const void *value) {
 	Instance *i = (Instance *)self;
 	auto it = i->script->props.find(*(const StringName *)name);
@@ -55,7 +70,14 @@ GDExtensionBool i_get(void *self, const void *name, void *ret) {
 	Instance *i = (Instance *)self;
 	auto it = i->script->props.find(*(const StringName *)name);
 	if (it == i->script->props.end()) {
-		return i->script->read_static(*(const StringName *)name, *(Variant *)ret);
+		if (i->script->read_static(*(const StringName *)name, *(Variant *)ret)) {
+			return true;
+		}
+		if (i->script->_has_script_signal(*(const StringName *)name)) {
+			*(Variant *)ret = Signal(i->owner, *(const StringName *)name);
+			return true;
+		}
+		return false;
 	}
 	it->value->get(i->data, *(Variant *)ret);
 	return true;
@@ -247,13 +269,27 @@ static void check_live(const Variant &base, const Loc &loc) {
 Variant mcall(const Variant &base, const StringName &name, std::initializer_list<Variant> args, const Loc &loc) {
 	check_live(base, loc);
 	Variant self = base;
-	std::vector<const Variant *> ptrs;
+	const Variant **ptrs = (const Variant **)alloca(sizeof(Variant *) * (args.size() + 1));
+	size_t count = 0;
 	for (const Variant &a : args) {
-		ptrs.push_back(&a);
+		ptrs[count++] = &a;
+	}
+	if (base.get_type() == Variant::OBJECT) {
+		if (Instance *i = native_instance(raw_object(base))) {
+			auto it = i->script->methods.find(name);
+			if (it != i->script->methods.end() && count >= size_t(it->value->min_argc) && count <= size_t(it->value->argc)) {
+				Variant r;
+				try {
+					it->value->call(i->data, ptrs, int(count), r);
+				} catch (const gn::Abort &) {
+				}
+				return r;
+			}
+		}
 	}
 	Variant r;
 	GDExtensionCallError e = {};
-	gdextension_interface::variant_call(self._native_ptr(), name._native_ptr(), (const void *const *)ptrs.data(), ptrs.size(), r._native_ptr(), &e);
+	gdextension_interface::variant_call(self._native_ptr(), name._native_ptr(), (const void *const *)ptrs, count, r._native_ptr(), &e);
 	if (e.error != GDEXTENSION_CALL_OK) {
 		fail("Invalid call.", loc);
 	}
@@ -464,15 +500,30 @@ bool is_builtin(const Variant &v, Variant::Type type) {
 }
 
 bool is_class(const Variant &v, const StringName &cls) {
-	if (v.get_type() != Variant::OBJECT || !v.booleanize()) {
+	if (!is_instance_valid(v)) {
 		return false;
+	}
+	void *tag = gdextension_interface::classdb_get_class_tag(cls._native_ptr());
+	if (tag) {
+		return gdextension_interface::object_cast_to(raw_object(v), tag) != nullptr;
 	}
 	Variant self = v;
 	return self.call(GN_SN("is_class"), cls).booleanize();
 }
 
 bool is_script(const Variant &v, const char *path) {
-	if (v.get_type() != Variant::OBJECT || !v.booleanize()) {
+	if (!is_instance_valid(v)) {
+		return false;
+	}
+	if (Instance *i = native_instance(raw_object(v))) {
+		for (const char *ancestor : i->script->chain) {
+			if (strcmp(ancestor, path) == 0) {
+				return true;
+			}
+		}
+		return false;
+	}
+	if (is_native_script(raw_object(v))) {
 		return false;
 	}
 	Variant self = v;
@@ -700,13 +751,14 @@ void set_named(Variant &base, const StringName &name, const Variant &value, cons
 }
 
 Variant construct(Variant::Type type, std::initializer_list<Variant> args, const Loc &loc) {
-	std::vector<const Variant *> ptrs;
+	const Variant **ptrs = (const Variant **)alloca(sizeof(Variant *) * (args.size() + 1));
+	size_t count = 0;
 	for (const Variant &a : args) {
-		ptrs.push_back(&a);
+		ptrs[count++] = &a;
 	}
 	Variant r;
 	GDExtensionCallError e = {};
-	gdextension_interface::variant_construct((GDExtensionVariantType)type, r._native_ptr(), (const void *const *)ptrs.data(), ptrs.size(), &e);
+	gdextension_interface::variant_construct((GDExtensionVariantType)type, r._native_ptr(), (const void *const *)ptrs, count, &e);
 	if (e.error != GDEXTENSION_CALL_OK) {
 		fail("Invalid constructor arguments.", loc);
 	}
@@ -719,6 +771,21 @@ Variant instantiate(const StringName &cls) {
 
 Variant singleton(const StringName &name) {
 	return Engine::get_singleton()->call(GN_SN("get_singleton"), name);
+}
+
+static std::mutex constants_lock;
+static std::vector<Variant *> constants;
+
+const Variant *keep(Variant *constant) {
+	std::lock_guard<std::mutex> guard(constants_lock);
+	constants.push_back(constant);
+	return constant;
+}
+
+void release_constants() {
+	for (Variant *constant : constants) {
+		*constant = Variant();
+	}
 }
 
 Variant load(const String &path) {
@@ -761,6 +828,12 @@ void NativeScript::_bind_methods() {
 
 void NativeScript::setup(const gn::Class *p_info) {
 	info = p_info;
+	for (const gn::Class *c = info; c; c = c->parent ? find_class(c->parent) : nullptr) {
+		chain.push_back(c->path);
+	}
+	for (const gn::Class *c = info; c; c = c->parent ? find_class(c->parent) : nullptr) {
+		chain.push_back(c->path);
+	}
 	for (int n = 0; n < info->method_count; n++) {
 		methods.insert(info->methods[n].name, &info->methods[n]);
 	}
@@ -802,6 +875,7 @@ void NativeScript::release_all() {
 	for (const gn::Class *c : registry()) {
 		c->static_clear();
 	}
+	gn::release_constants();
 	live_scripts().clear();
 }
 
@@ -897,7 +971,8 @@ bool NativeScript::_has_script_signal(const StringName &name) const {
 			return true;
 		}
 	}
-	return false;
+	Ref<Script> parent = _get_base_script();
+	return parent.is_valid() && parent->has_script_signal(name);
 }
 
 TypedArray<Dictionary> NativeScript::_get_script_signal_list() const {

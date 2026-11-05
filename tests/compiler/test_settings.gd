@@ -3,6 +3,7 @@ extends "res://compiler/probe.gd"
 const UNSUPPORTED := "#pragma native\n@rpc func f() -> void:\n\tpass\n"
 const UNSUPPORTED_CHILD := "extends Calc\n@rpc func f() -> void:\n\tpass\n"
 const UNTYPED := "#pragma native\nfunc probe_untyped():\n\tpass\n"
+const WIDENED := "#pragma native\nclass Base:\n\tfunc kind():\n\t\treturn 1\nclass Child extends Base:\n\tfunc kind() -> int:\n\t\treturn 2\n"
 
 
 func test_project_error_falls_back() -> void:
@@ -33,6 +34,10 @@ func test_children_left_interpreted() -> void:
 
 func test_untyped_error() -> void:
 	assert_string_contains(export_with(UNTYPED, "warnings/untyped_code=2"), "[GodotNative] res://probe/probe.gd:2:")
+
+
+func test_typed_override_of_untyped_parent() -> void:
+	assert_false(export_with(WIDENED).contains("must keep the same"))
 
 
 func test_untyped_ignored() -> void:

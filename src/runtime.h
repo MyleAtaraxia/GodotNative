@@ -7,6 +7,8 @@
 #include <godot_cpp/classes/script_language_extension.hpp>
 #include <godot_cpp/templates/hash_map.hpp>
 
+#include <vector>
+
 namespace godot {
 
 class NativeLanguage : public ScriptLanguageExtension {
@@ -77,6 +79,7 @@ protected:
 
 public:
 	const gn::Class *info = nullptr;
+	std::vector<const char *> chain;
 	mutable Ref<Script> base_script;
 	HashMap<StringName, const gn::Method *> methods;
 	HashMap<StringName, const gn::Prop *> props;

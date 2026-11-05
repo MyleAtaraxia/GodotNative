@@ -173,6 +173,12 @@ Variant construct(Variant::Type type, std::initializer_list<Variant> args, const
 Variant instantiate(const StringName &cls);
 Variant singleton(const StringName &name);
 Variant load(const String &path);
+const Variant *keep(Variant *constant);
+template <typename T>
+const T *keep(T *constant) {
+	return constant;
+}
+void release_constants();
 Variant native_script(const char *path);
 Object *script_object(const char *path);
 Variant static_call(GDExtensionMethodBindPtr mb, std::initializer_list<Variant> args, const Loc &loc);
@@ -310,7 +316,8 @@ inline Variant builtin_constant_as<Variant>(Variant::Type type, const StringName
 } // namespace gn
 
 #define GN_L(line) (gn::Loc{ GN_FILE, __func__, line })
+#define GN_STR(s) ([]() -> const godot::String & { static const godot::String *n = new godot::String(s); return *n; }())
 #define GN_SN(s) ([]() -> const godot::StringName & { static const godot::StringName *n = new godot::StringName(s); return *n; }())
-#define GN_BC(T, type, name) ([]() -> const T & { static const T *v = new T(gn::builtin_constant_as<T>(type, GN_SN(name))); return *v; }())
+#define GN_BC(T, type, name) ([]() -> const T & { static const T *v = gn::keep(new T(gn::builtin_constant_as<T>(type, GN_SN(name)))); return *v; }())
 #define GN_MB(cls, name, hash) ([]() { static const GDExtensionMethodBindPtr mb = gn::method_bind(cls, name, hash); return mb; }())
 #define GN_SINGLETON(name) ([]() -> const Variant & { static const Variant *v = new Variant(gn::singleton(GN_SN(name))); return *v; }())
