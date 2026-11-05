@@ -259,6 +259,13 @@ inline bool is_instance_valid(const Variant &v) {
 	return id != 0 && (counted || gdextension_interface::object_get_instance_from_id(id) != nullptr);
 }
 
+void *native_data(void *object);
+
+template <typename T>
+inline T *native(const Variant &v) {
+	return is_instance_valid(v) ? static_cast<T *>(native_data(raw_object(v))) : nullptr;
+}
+
 inline void *live_object(const Variant &v, const Loc &loc) {
 	if (!is_instance_valid(v)) {
 		fail(v.get_type() == Variant::NIL ? "Cannot call a method on a null value." : "Cannot call a method on a previously freed instance.", loc);

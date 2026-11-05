@@ -250,6 +250,11 @@ void fail(const char *msg, const Loc &loc) {
 	throw Abort{};
 }
 
+void *native_data(void *object) {
+	Instance *i = native_instance(object);
+	return i ? i->data : nullptr;
+}
+
 Variant evaluate(Variant::Operator o, const Variant &a, const Variant &b, const Loc &loc) {
 	Variant r;
 	bool valid = false;
