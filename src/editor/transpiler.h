@@ -8,7 +8,7 @@
 
 namespace gn {
 
-enum class Ty { Void, Bool, Int, Float, Str, V2, V3, PF64, PI64, Arr, Dict, Var };
+enum class Ty { Void, Bool, Int, Float, Str, V2, V3, V2I, V3I, Color, Rect2, Basis, Quat, T3D, T2D, Aabb, PF64, PI64, Arr, Dict, Var };
 
 struct NativeMember {
 	bool found = false;
@@ -23,6 +23,14 @@ struct NativeBind {
 	bool found = false;
 	bool ptr = false;
 	std::string owner;
+	uint32_t hash = 0;
+	std::vector<std::string> args;
+	std::vector<std::string> defaults;
+	std::string ret;
+};
+
+struct BuiltinMethod {
+	bool found = false;
 	uint32_t hash = 0;
 	std::vector<std::string> args;
 	std::vector<std::string> defaults;
@@ -45,6 +53,9 @@ public:
 	virtual bool has_signal(const std::string &cls, const std::string &name) const = 0;
 	virtual bool global_constant(const std::string &name, int64_t &value) const = 0;
 	virtual bool has_builtin_constant(const std::string &type, const std::string &name) const = 0;
+	virtual BuiltinMethod builtin_method(const std::string &type, const std::string &name) const = 0;
+	virtual int builtin_constructor(const std::string &type, const std::vector<std::string> &args) const = 0;
+	virtual std::string builtin_operator(const std::string &left, const std::string &op, const std::string &right) const = 0;
 };
 
 class ProjectQuery : public ClassQuery {

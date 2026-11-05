@@ -319,6 +319,10 @@ GDExtensionMethodBindPtr method_bind(const char *cls, const char *name, int64_t 
 	return gdextension_interface::classdb_get_method_bind(StringName(cls)._native_ptr(), StringName(name)._native_ptr(), hash);
 }
 
+GDExtensionPtrBuiltInMethod builtin_method(Variant::Type type, const char *name, int64_t hash) {
+	return gdextension_interface::variant_get_ptr_builtin_method((GDExtensionVariantType)type, StringName(name)._native_ptr(), hash);
+}
+
 Variant static_call(GDExtensionMethodBindPtr mb, std::initializer_list<Variant> args, const Loc &loc) {
 	std::vector<GDExtensionConstVariantPtr> ptrs;
 	for (const Variant &a : args) {

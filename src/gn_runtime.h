@@ -244,6 +244,7 @@ Object *script_object(const char *path);
 Variant static_call(GDExtensionMethodBindPtr mb, std::initializer_list<Variant> args, const Loc &loc);
 Variant dynamic_static(const char *cls, const char *name, std::initializer_list<Variant> args);
 GDExtensionMethodBindPtr method_bind(const char *cls, const char *name, int64_t hash);
+GDExtensionPtrBuiltInMethod builtin_method(Variant::Type type, const char *name, int64_t hash);
 
 inline void *raw_object(const Variant &v) {
 	return raw_read<void *>(v, 16);
@@ -339,6 +340,9 @@ inline T cast(const Variant &v, Variant::Type t, const Loc &loc) {
 	if (got != t && !numeric && !Variant::can_convert_strict(got, t)) {
 		fail("Trying to assign a value of the wrong type.", loc);
 	}
+	if (got != t && !numeric && got != Variant::NIL && got != Variant::OBJECT) {
+		return cast<T>(construct(t, { v }, loc), t, loc);
+	}
 	if constexpr (std::is_constructible_v<T, const Variant &> && std::is_base_of_v<Variant, T> && !std::is_same_v<T, Variant>) {
 		return T(v);
 	} else {
@@ -389,6 +393,35 @@ inline void pcall_void(GDExtensionMethodBindPtr mb, void *object, const A &...a)
 	gdextension_interface::object_method_bind_ptrcall(mb, object, args, nullptr);
 }
 
+template <typename R, typename B, typename... A>
+inline R bcall(GDExtensionPtrBuiltInMethod fn, const B &base, const A &...a) {
+	const void *args[] = { raw_arg(a)..., nullptr };
+	typename RawType<R>::type r{};
+	fn(const_cast<void *>(raw_arg(base)), args, &r, int(sizeof...(A)));
+	return r;
+}
+
+template <typename B, typename... A>
+inline void bcall_void(GDExtensionPtrBuiltInMethod fn, const B &base, const A &...a) {
+	const void *args[] = { raw_arg(a)..., nullptr };
+	fn(const_cast<void *>(raw_arg(base)), args, nullptr, int(sizeof...(A)));
+}
+
+template <typename R, typename A, typename B>
+inline R bop(GDExtensionPtrOperatorEvaluator fn, const A &a, const B &b) {
+	typename RawType<R>::type r{};
+	fn(raw_arg(a), raw_arg(b), &r);
+	return r;
+}
+
+template <typename R, typename... A>
+inline R bctor(GDExtensionPtrConstructor fn, const A &...a) {
+	const void *args[] = { raw_arg(a)..., nullptr };
+	R r{};
+	fn(&r, args);
+	return r;
+}
+
 template <typename T>
 inline T builtin_constant_as(Variant::Type type, const StringName &name) {
 	return builtin_constant(type, name).operator T();
@@ -406,4 +439,7 @@ inline Variant builtin_constant_as<Variant>(Variant::Type type, const StringName
 #define GN_SN(s) ([]() -> const godot::StringName & { static const godot::StringName *n = new godot::StringName(s); return *n; }())
 #define GN_BC(T, type, name) ([]() -> const T & { static const T *v = gn::keep(new T(gn::builtin_constant_as<T>(type, GN_SN(name)))); return *v; }())
 #define GN_MB(cls, name, hash) ([]() { static const GDExtensionMethodBindPtr mb = gn::method_bind(cls, name, hash); return mb; }())
+#define GN_BM(type, name, hash) ([]() { static const GDExtensionPtrBuiltInMethod fn = gn::builtin_method(type, name, hash); return fn; }())
+#define GN_OP(op, left, right) ([]() { static const GDExtensionPtrOperatorEvaluator fn = gdextension_interface::variant_get_ptr_operator_evaluator((GDExtensionVariantOperator)op, (GDExtensionVariantType)left, (GDExtensionVariantType)right); return fn; }())
+#define GN_CTOR(type, index) ([]() { static const GDExtensionPtrConstructor fn = gdextension_interface::variant_get_ptr_constructor((GDExtensionVariantType)type, index); return fn; }())
 #define GN_SINGLETON(name) ([]() -> const Variant & { static const Variant *v = new Variant(gn::singleton(GN_SN(name))); return *v; }())

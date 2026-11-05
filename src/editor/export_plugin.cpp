@@ -55,6 +55,9 @@ struct ApiData {
 	std::set<std::string> builtin_constants;
 	std::set<std::string> builtin_types;
 	std::map<std::string, ApiMethod> methods;
+	std::map<std::string, ApiMethod> builtin_methods;
+	std::map<std::string, int> builtin_constructors;
+	std::map<std::string, std::string> builtin_operators;
 	std::map<std::string, ApiProperty> properties;
 	std::map<std::string, std::string> parents;
 	std::set<std::string> classes;
@@ -117,6 +120,42 @@ const ApiData &api_data() {
 			Dictionary k = list[c];
 			data->builtin_constants.insert(std_str(b["name"]) + "." + std_str(k["name"]));
 		}
+		std::string type = std_str(b["name"]);
+		Array calls = b.get("methods", Array());
+		for (int m = 0; m < calls.size(); m++) {
+			Dictionary d = calls[m];
+			if (bool(d.get("is_vararg", false)) || bool(d.get("is_static", false)) || !d.has("hash")) {
+				continue;
+			}
+			ApiMethod info;
+			info.hash = uint32_t(int64_t(double(d["hash"])));
+			Array args = d.get("arguments", Array());
+			for (int a = 0; a < args.size(); a++) {
+				Dictionary arg = args[a];
+				info.args.push_back(std_str(arg["type"]));
+				info.defaults.push_back(std_str(arg.get("default_value", "")));
+			}
+			info.ret = std_str(d.get("return_type", "void"));
+			data->builtin_methods[type + "." + std_str(d["name"])] = info;
+		}
+		Array constructors = b.get("constructors", Array());
+		for (int m = 0; m < constructors.size(); m++) {
+			Dictionary d = constructors[m];
+			std::string key = type;
+			Array args = d.get("arguments", Array());
+			for (int a = 0; a < args.size(); a++) {
+				Dictionary arg = args[a];
+				key += "," + std_str(arg["type"]);
+			}
+			data->builtin_constructors[key] = int(double(d["index"]));
+		}
+		Array operators = b.get("operators", Array());
+		for (int m = 0; m < operators.size(); m++) {
+			Dictionary d = operators[m];
+			if (d.has("right_type")) {
+				data->builtin_operators[type + " " + std_str(d["name"]) + " " + std_str(d["right_type"])] = std_str(d["return_type"]);
+			}
+		}
 	}
 	Array classes = api.get("classes", Array());
 	for (int i = 0; i < classes.size(); i++) {
@@ -170,6 +209,15 @@ gn::Ty to_ty(int64_t t, bool is_return_variant) {
 		case Variant::STRING: return gn::Ty::Str;
 		case Variant::VECTOR2: return gn::Ty::V2;
 		case Variant::VECTOR3: return gn::Ty::V3;
+		case Variant::VECTOR2I: return gn::Ty::V2I;
+		case Variant::VECTOR3I: return gn::Ty::V3I;
+		case Variant::COLOR: return gn::Ty::Color;
+		case Variant::RECT2: return gn::Ty::Rect2;
+		case Variant::BASIS: return gn::Ty::Basis;
+		case Variant::QUATERNION: return gn::Ty::Quat;
+		case Variant::TRANSFORM3D: return gn::Ty::T3D;
+		case Variant::TRANSFORM2D: return gn::Ty::T2D;
+		case Variant::AABB: return gn::Ty::Aabb;
 		case Variant::PACKED_FLOAT64_ARRAY: return gn::Ty::PF64;
 		case Variant::PACKED_INT64_ARRAY: return gn::Ty::PI64;
 		case Variant::ARRAY: return gn::Ty::Arr;
@@ -338,6 +386,33 @@ public:
 			}
 		}
 		return "";
+	}
+	gn::BuiltinMethod builtin_method(const std::string &type, const std::string &name) const override {
+		gn::BuiltinMethod r;
+		const ApiData &api = api_data();
+		auto it = api.builtin_methods.find(type + "." + name);
+		if (it != api.builtin_methods.end()) {
+			r.found = true;
+			r.hash = it->second.hash;
+			r.args = it->second.args;
+			r.defaults = it->second.defaults;
+			r.ret = it->second.ret;
+		}
+		return r;
+	}
+	int builtin_constructor(const std::string &type, const std::vector<std::string> &args) const override {
+		std::string key = type;
+		for (const std::string &arg : args) {
+			key += "," + arg;
+		}
+		const ApiData &api = api_data();
+		auto it = api.builtin_constructors.find(key);
+		return it == api.builtin_constructors.end() ? -1 : it->second;
+	}
+	std::string builtin_operator(const std::string &left, const std::string &op, const std::string &right) const override {
+		const ApiData &api = api_data();
+		auto it = api.builtin_operators.find(left + " " + op + " " + right);
+		return it == api.builtin_operators.end() ? "" : it->second;
 	}
 	gn::NativeMember property(const std::string &cls, const std::string &name) const override {
 		gn::NativeMember r;

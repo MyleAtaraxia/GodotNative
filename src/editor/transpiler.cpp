@@ -1,5 +1,7 @@
 #include "transpiler.h"
 
+#include <tuple>
+
 #include <algorithm>
 #include <cstring>
 #include <memory>
@@ -237,6 +239,15 @@ const char *cty(Ty t) {
 		case Ty::Str: return "String";
 		case Ty::V2: return "Vector2";
 		case Ty::V3: return "Vector3";
+		case Ty::V2I: return "Vector2i";
+		case Ty::V3I: return "Vector3i";
+		case Ty::Color: return "Color";
+		case Ty::Rect2: return "Rect2";
+		case Ty::Basis: return "Basis";
+		case Ty::Quat: return "Quaternion";
+		case Ty::T3D: return "Transform3D";
+		case Ty::T2D: return "Transform2D";
+		case Ty::Aabb: return "AABB";
 		case Ty::PF64: return "gn::PackedFloats";
 		case Ty::PI64: return "gn::PackedInts";
 		case Ty::Arr: return "Array";
@@ -275,11 +286,39 @@ const char *vty(Ty t) {
 		case Ty::Str: return "STRING";
 		case Ty::V2: return "VECTOR2";
 		case Ty::V3: return "VECTOR3";
+		case Ty::V2I: return "VECTOR2I";
+		case Ty::V3I: return "VECTOR3I";
+		case Ty::Color: return "COLOR";
+		case Ty::Rect2: return "RECT2";
+		case Ty::Basis: return "BASIS";
+		case Ty::Quat: return "QUATERNION";
+		case Ty::T3D: return "TRANSFORM3D";
+		case Ty::T2D: return "TRANSFORM2D";
+		case Ty::Aabb: return "AABB";
 		case Ty::PF64: return "PACKED_FLOAT64_ARRAY";
 		case Ty::PI64: return "PACKED_INT64_ARRAY";
 		case Ty::Arr: return "ARRAY";
 		case Ty::Dict: return "DICTIONARY";
 		default: return "NIL";
+	}
+}
+
+bool math(Ty t) {
+	return t >= Ty::V2I && t <= Ty::Aabb;
+}
+
+std::string api_name(Ty t) {
+	switch (t) {
+		case Ty::Bool: return "bool";
+		case Ty::Int: return "int";
+		case Ty::Float: return "float";
+		case Ty::Str: return "String";
+		case Ty::Arr: return "Array";
+		case Ty::Dict: return "Dictionary";
+		case Ty::V2:
+		case Ty::V3:
+			return cty(t);
+		default: return math(t) ? cty(t) : "";
 	}
 }
 
@@ -684,7 +723,7 @@ class Compiler {
 			last_ref.elem_cls = elem_cls;
 			last_ref.elem_t = elem_t;
 		}
-		static const std::map<std::string, Ty> m = { { "void", Ty::Void }, { "bool", Ty::Bool }, { "int", Ty::Int }, { "float", Ty::Float }, { "String", Ty::Str }, { "Vector2", Ty::V2 }, { "Vector3", Ty::V3 }, { "PackedFloat64Array", Ty::PF64 }, { "PackedInt64Array", Ty::PI64 }, { "Array", Ty::Arr }, { "Dictionary", Ty::Dict } };
+		static const std::map<std::string, Ty> m = { { "void", Ty::Void }, { "bool", Ty::Bool }, { "int", Ty::Int }, { "float", Ty::Float }, { "String", Ty::Str }, { "Vector2", Ty::V2 }, { "Vector3", Ty::V3 }, { "Vector2i", Ty::V2I }, { "Vector3i", Ty::V3I }, { "Color", Ty::Color }, { "Rect2", Ty::Rect2 }, { "Basis", Ty::Basis }, { "Quaternion", Ty::Quat }, { "Transform3D", Ty::T3D }, { "Transform2D", Ty::T2D }, { "AABB", Ty::Aabb }, { "PackedFloat64Array", Ty::PF64 }, { "PackedInt64Array", Ty::PI64 }, { "Array", Ty::Arr }, { "Dictionary", Ty::Dict } };
 		auto it = m.find(n);
 		if (it != m.end()) {
 			return it->second;
@@ -849,6 +888,9 @@ class Compiler {
 			}
 			return std::string("gn::cast<") + cty(to) + ">(" + e.c + ", Variant::" + vty(to) + ", " + L(line) + ")";
 		}
+		if (math(e.t) || math(to)) {
+			return unbox("gn::construct(Variant::" + std::string(vty(to)) + ", {Variant(" + e.c + ")}, " + L(line) + ")", cty(to));
+		}
 		throw Err{ line, std::string("cannot convert ") + cty(e.t) + " to " + cty(to) };
 	}
 
@@ -860,6 +902,34 @@ class Compiler {
 			return "(" + e.c + " != 0)";
 		}
 		return "Variant(" + e.c + ").booleanize()";
+	}
+
+	bool typed_op(const std::string &op, const char *name, const E &a, const E &b, E &r) const {
+		if (a.t == b.t && math(a.t) && (op == "==" || op == "!=")) {
+			r = { "(" + a.c + " " + op + " " + b.c + ")", Ty::Bool };
+			return true;
+		}
+		static const std::map<std::tuple<Ty, std::string, Ty>, std::pair<std::string, Ty>> direct = {
+			{ { Ty::T3D, "*", Ty::T3D }, { " * ", Ty::T3D } }, { { Ty::T3D, "*", Ty::V3 }, { ".xform", Ty::V3 } }, { { Ty::T2D, "*", Ty::T2D }, { " * ", Ty::T2D } }, { { Ty::T2D, "*", Ty::V2 }, { ".xform", Ty::V2 } },
+			{ { Ty::Basis, "*", Ty::Basis }, { " * ", Ty::Basis } }, { { Ty::Basis, "*", Ty::V3 }, { ".xform", Ty::V3 } }, { { Ty::Quat, "*", Ty::Quat }, { " * ", Ty::Quat } }, { { Ty::Quat, "*", Ty::V3 }, { ".xform", Ty::V3 } },
+			{ { Ty::Color, "+", Ty::Color }, { " + ", Ty::Color } }, { { Ty::Color, "-", Ty::Color }, { " - ", Ty::Color } }, { { Ty::Color, "*", Ty::Color }, { " * ", Ty::Color } },
+			{ { Ty::V2I, "+", Ty::V2I }, { " + ", Ty::V2I } }, { { Ty::V2I, "-", Ty::V2I }, { " - ", Ty::V2I } }, { { Ty::V3I, "+", Ty::V3I }, { " + ", Ty::V3I } }, { { Ty::V3I, "-", Ty::V3I }, { " - ", Ty::V3I } },
+		};
+		auto d = direct.find({ a.t, op, b.t });
+		if (d != direct.end()) {
+			const std::string &how = d->second.first;
+			r = { how[0] == ' ' ? "(" + a.c + how + b.c + ")" : a.c + how + "(" + b.c + ")", d->second.second };
+			return true;
+		}
+		const std::string left = api_name(a.t), right = api_name(b.t);
+		const std::string ret = left.empty() || right.empty() ? "" : classes.builtin_operator(left, op, right);
+		Ty ty;
+		std::string cpp, variant;
+		if (ret.empty() || !api_type(ret, ty, cpp, variant) || !variant.empty()) {
+			return false;
+		}
+		r = { "gn::bop<" + cpp + ">(GN_OP(Variant::" + name + ", Variant::" + vty(a.t) + ", Variant::" + vty(b.t) + "), " + a.c + ", " + b.c + ")", ty };
+		return true;
 	}
 
 	E variant_op(const char *op, const E &a, const E &b, int line) {
@@ -910,6 +980,10 @@ class Compiler {
 		}
 		if (a.t == Ty::Str && b.t == Ty::Str && (op == "+" || op == "==" || op == "!=")) {
 			return { "(" + a.c + " " + op + " " + b.c + ")", op == "+" ? Ty::Str : Ty::Bool };
+		}
+		E typed;
+		if ((math(a.t) || math(b.t) || av || bv) && vops.count(op) && typed_op(op, vops.at(op), a, b, typed)) {
+			return typed;
 		}
 		return variant_op(vops.at(op), a, b, line);
 	}
@@ -1046,7 +1120,7 @@ class Compiler {
 			if (a.t == Ty::Int) {
 				return { "gn::neg(" + a.c + ")", Ty::Int };
 			}
-			if (a.t == Ty::Float || a.t == Ty::V2 || a.t == Ty::V3) {
+			if (a.t == Ty::Float || a.t == Ty::V2 || a.t == Ty::V3 || a.t == Ty::V2I || a.t == Ty::V3I || a.t == Ty::Quat) {
 				return { "(-" + a.c + ")", a.t };
 			}
 			return { "gn::op(Variant::OP_NEGATE, " + conv(a, Ty::Var, line) + ", Variant(), " + L(line) + ")", Ty::Var };
@@ -1243,7 +1317,7 @@ class Compiler {
 	}
 
 	bool api_type(const std::string &name, Ty &ty, std::string &cpp, std::string &variant) const {
-		static const std::map<std::string, Ty> simple = { { "int", Ty::Int }, { "float", Ty::Float }, { "bool", Ty::Bool }, { "String", Ty::Str }, { "Vector2", Ty::V2 }, { "Vector3", Ty::V3 }, { "PackedFloat64Array", Ty::PF64 }, { "PackedInt64Array", Ty::PI64 }, { "Array", Ty::Arr }, { "Dictionary", Ty::Dict }, { "Variant", Ty::Var } };
+		static const std::map<std::string, Ty> simple = { { "int", Ty::Int }, { "float", Ty::Float }, { "bool", Ty::Bool }, { "String", Ty::Str }, { "Vector2", Ty::V2 }, { "Vector3", Ty::V3 }, { "Vector2i", Ty::V2I }, { "Vector3i", Ty::V3I }, { "Color", Ty::Color }, { "Rect2", Ty::Rect2 }, { "Basis", Ty::Basis }, { "Quaternion", Ty::Quat }, { "Transform3D", Ty::T3D }, { "Transform2D", Ty::T2D }, { "AABB", Ty::Aabb }, { "PackedFloat64Array", Ty::PF64 }, { "PackedInt64Array", Ty::PI64 }, { "Array", Ty::Arr }, { "Dictionary", Ty::Dict }, { "Variant", Ty::Var } };
 		std::string n = name;
 		variant.clear();
 		if (n.rfind("enum::", 0) == 0 || n.rfind("bitfield::", 0) == 0) {
@@ -1279,31 +1353,26 @@ class Compiler {
 		return m.ret;
 	}
 
-	bool bound_call(const std::string &object, const std::string &cls, const std::string &n, const std::vector<E> &a, int line, E &r) {
-		NativeBind m = classes.bind(cls, n);
-		Ty ret = Ty::Void;
-		std::string ret_cpp, ret_variant;
-		if (!m.found || !m.ptr || a.size() > m.args.size() || (m.ret != "void" && !api_type(m.ret, ret, ret_cpp, ret_variant))) {
-			return false;
-		}
+	bool typed_args(const std::vector<std::string> &types, const std::vector<std::string> &defaults, const std::vector<E> &a, int line, std::string &list) {
 		std::string tail;
-		for (size_t i = a.size(); i < m.args.size(); i++) {
+		for (size_t i = a.size(); i < types.size(); i++) {
 			Ty ty;
 			std::string cpp, variant;
-			api_type(m.args[i], ty, cpp, variant);
-			const std::string &d = m.defaults[i];
+			api_type(types[i], ty, cpp, variant);
+			const std::string &d = defaults[i];
 			bool number = !d.empty() && d.find_first_not_of("-0123456789.e") == std::string::npos;
 			if ((ty == Ty::Bool && (d == "true" || d == "false")) || ((ty == Ty::Int || ty == Ty::Float) && number)) {
 				tail += ", " + cpp + "(" + d + ")";
+			} else if (cpp == "Variant" && d == "null") {
+				tail += ", Variant()";
 			} else {
 				return false;
 			}
 		}
-		std::string list;
 		for (size_t i = 0; i < a.size(); i++) {
 			Ty ty;
 			std::string cpp, variant;
-			api_type(m.args[i], ty, cpp, variant);
+			api_type(types[i], ty, cpp, variant);
 			std::string value;
 			if (!variant.empty()) {
 				std::string v = conv(a[i], Ty::Var, line);
@@ -1314,6 +1383,47 @@ class Compiler {
 			list += ", " + value;
 		}
 		list += tail;
+		return true;
+	}
+
+	bool builtin_call(const E &b, const std::string &n, const std::vector<E> &a, int line, E &r) {
+		BuiltinMethod m = classes.builtin_method(api_name(b.t), n);
+		Ty ret = Ty::Void;
+		std::string ret_cpp, ret_variant, list;
+		if (!m.found || a.size() > m.args.size() || (m.ret != "void" && !api_type(m.ret, ret, ret_cpp, ret_variant))) {
+			return false;
+		}
+		for (const std::string &type : m.args) {
+			Ty ty;
+			std::string cpp, variant;
+			if (!api_type(type, ty, cpp, variant)) {
+				return false;
+			}
+		}
+		if (!typed_args(m.args, m.defaults, a, line, list)) {
+			return false;
+		}
+		std::string head = "GN_BM(Variant::" + std::string(vty(b.t)) + ", \"" + n + "\", " + std::to_string(m.hash) + "LL), " + b.c;
+		if (m.ret == "void") {
+			r = { "gn::bcall_void(" + head + list + ")", Ty::Void };
+			return true;
+		}
+		std::string call = "gn::bcall<" + ret_cpp + ">(" + head + list + ")";
+		r = { ret_variant.empty() ? call : "Variant(" + call + ")", ret };
+		r.ref.builtin = ret_variant;
+		return true;
+	}
+
+	bool bound_call(const std::string &object, const std::string &cls, const std::string &n, const std::vector<E> &a, int line, E &r) {
+		NativeBind m = classes.bind(cls, n);
+		Ty ret = Ty::Void;
+		std::string ret_cpp, ret_variant, list;
+		if (!m.found || !m.ptr || a.size() > m.args.size() || (m.ret != "void" && !api_type(m.ret, ret, ret_cpp, ret_variant))) {
+			return false;
+		}
+		if (!typed_args(m.args, m.defaults, a, line, list)) {
+			return false;
+		}
 		std::string head = "GN_MB(\"" + m.owner + "\", \"" + n + "\", " + std::to_string(m.hash) + "LL), " + object;
 		if (m.ret == "void") {
 			r = { "gn::pcall_void(" + head + list + ")", Ty::Void };
@@ -1452,7 +1562,7 @@ class Compiler {
 
 	bool global_call(const std::string &n, E &r, int line) {
 		static const std::set<std::string> f1 = { "sqrt", "sin", "cos", "tan", "exp", "log" };
-		static const std::map<std::string, Ty> ctors = { { "Vector3", Ty::V3 }, { "Vector2", Ty::V2 }, { "PackedFloat64Array", Ty::PF64 }, { "PackedInt64Array", Ty::PI64 }, { "Array", Ty::Arr }, { "Dictionary", Ty::Dict } };
+		static const std::map<std::string, Ty> ctors = { { "Vector3", Ty::V3 }, { "Vector2i", Ty::V2I }, { "Vector3i", Ty::V3I }, { "Color", Ty::Color }, { "Rect2", Ty::Rect2 }, { "Basis", Ty::Basis }, { "Quaternion", Ty::Quat }, { "Transform3D", Ty::T3D }, { "Transform2D", Ty::T2D }, { "AABB", Ty::Aabb }, { "Vector2", Ty::V2 }, { "PackedFloat64Array", Ty::PF64 }, { "PackedInt64Array", Ty::PI64 }, { "Array", Ty::Arr }, { "Dictionary", Ty::Dict } };
 		if (n == "print") {
 			p += 2;
 			std::vector<E> a = args();
@@ -1627,25 +1737,11 @@ class Compiler {
 			return true;
 		}
 		auto c = ctors.find(n);
-		if (c != ctors.end()) {
-			p += 2;
-			std::vector<E> a = args();
-			bool vector = (c->second == Ty::V3 || c->second == Ty::V2) && a.size() != 1;
-			if (!vector && !a.empty()) {
-				r = { unbox(std::string("gn::construct(Variant::") + vty(c->second) + ", {" + var_args(a, line) + "}, " + L(line) + ")", cty(c->second)), c->second };
-				return true;
-			}
-			std::string s = std::string(cty(c->second)) + "(";
-			for (size_t i = 0; i < a.size(); i++) {
-				s += (i ? ", " : "") + ("real_t(" + conv(a[i], Ty::Float, line) + ")");
-			}
-			r = { s + ")", c->second };
-			return true;
-		}
 		auto b = builtin_ctors().find(n);
-		if (b != builtin_ctors().end()) {
+		if (c != ctors.end() || b != builtin_ctors().end()) {
 			p += 2;
 			std::vector<E> a = args();
+			Ty ty = c != ctors.end() ? c->second : Ty::Var;
 			static const std::map<std::string, std::pair<std::string, size_t>> numbers = { { "Color", { "float", 4 } }, { "Vector2i", { "int32_t", 2 } }, { "Vector3i", { "int32_t", 3 } }, { "Vector4i", { "int32_t", 4 } }, { "Vector4", { "real_t", 4 } }, { "Rect2", { "real_t", 4 } }, { "Rect2i", { "int32_t", 4 } }, { "Plane", { "real_t", 4 } }, { "Quaternion", { "real_t", 4 } } };
 			auto direct = numbers.find(n);
 			bool typed = direct != numbers.end() && (a.size() == direct->second.second || (n == "Color" && a.size() == 3));
@@ -1657,10 +1753,36 @@ class Compiler {
 				for (const E &e : a) {
 					list += (list.empty() ? "" : ", ") + direct->second.first + "(" + e.c + ")";
 				}
-				r = { "Variant(" + n + "(" + list + "))", Ty::Var };
+				r = { (ty == Ty::Var ? "Variant(" : "") + n + "(" + list + ")" + (ty == Ty::Var ? ")" : ""), ty };
 				return true;
 			}
-			r = { "gn::construct(Variant::" + b->second + ", {" + var_args(a, line) + "}, " + L(line) + ")", Ty::Var };
+			if (ty == Ty::Var) {
+				r = { "gn::construct(Variant::" + b->second + ", {" + var_args(a, line) + "}, " + L(line) + ")", Ty::Var };
+				return true;
+			}
+			bool vector = (ty == Ty::V3 || ty == Ty::V2) && a.size() != 1;
+			if (vector || a.empty()) {
+				std::string s = std::string(cty(ty)) + "(";
+				for (size_t i = 0; i < a.size(); i++) {
+					s += (i ? ", " : "") + ("real_t(" + conv(a[i], Ty::Float, line) + ")");
+				}
+				r = { s + ")", ty };
+				return true;
+			}
+			if (math(ty) || ty == Ty::V3 || ty == Ty::V2) {
+				std::vector<std::string> names;
+				std::string list;
+				for (const E &e : a) {
+					names.push_back(api_name(e.t));
+					list += ", " + e.c;
+				}
+				int index = classes.builtin_constructor(n, names);
+				if (index >= 0) {
+					r = { "gn::bctor<" + std::string(cty(ty)) + ">(GN_CTOR(Variant::" + vty(ty) + ", " + std::to_string(index) + ")" + list + ")", ty };
+					return true;
+				}
+			}
+			r = { unbox(std::string("gn::construct(Variant::") + vty(ty) + ", {" + var_args(a, line) + "}, " + L(line) + ")", cty(ty)), ty };
 			return true;
 		}
 		return false;
@@ -1843,7 +1965,7 @@ class Compiler {
 				p += 3;
 				return { c->c, c->t };
 			}
-			static const std::map<std::string, std::pair<std::string, Ty>> typed = { { "Vector2", { "VECTOR2", Ty::V2 } }, { "Vector3", { "VECTOR3", Ty::V3 } }, { "String", { "STRING", Ty::Str } }, { "Array", { "ARRAY", Ty::Arr } }, { "Dictionary", { "DICTIONARY", Ty::Dict } } };
+			static const std::map<std::string, std::pair<std::string, Ty>> typed = { { "Vector2", { "VECTOR2", Ty::V2 } }, { "Vector3", { "VECTOR3", Ty::V3 } }, { "Vector2i", { "VECTOR2I", Ty::V2I } }, { "Vector3i", { "VECTOR3I", Ty::V3I } }, { "Color", { "COLOR", Ty::Color } }, { "Rect2", { "RECT2", Ty::Rect2 } }, { "Basis", { "BASIS", Ty::Basis } }, { "Quaternion", { "QUATERNION", Ty::Quat } }, { "Transform3D", { "TRANSFORM3D", Ty::T3D } }, { "Transform2D", { "TRANSFORM2D", Ty::T2D } }, { "AABB", { "AABB", Ty::Aabb } }, { "String", { "STRING", Ty::Str } }, { "Array", { "ARRAY", Ty::Arr } }, { "Dictionary", { "DICTIONARY", Ty::Dict } } };
 			std::string vt;
 			Ty ty = Ty::Var;
 			auto tp = typed.find(n);
@@ -2029,6 +2151,10 @@ class Compiler {
 		if (b.t == Ty::PF64 || b.t == Ty::PI64) {
 			throw Err{ line, "unsupported packed array method " + n };
 		}
+		E builtin;
+		if (!api_name(b.t).empty() && builtin_call(b, n, a, line, builtin)) {
+			return builtin;
+		}
 		if (!b.ref.cls.empty()) {
 			E typed;
 			if (bound_call(object_of(b, line), b.ref.cls, n, a, line, typed)) {
@@ -2044,13 +2170,30 @@ class Compiler {
 	}
 
 	E attr(const E &b, const std::string &n, int line) {
-		if ((b.t == Ty::V3 && (n == "x" || n == "y" || n == "z")) || (b.t == Ty::V2 && (n == "x" || n == "y"))) {
-			E e{ "double(" + b.c + "." + n + ")", Ty::Float };
+		static const std::map<std::pair<Ty, std::string>, std::pair<std::string, Ty>> fields = {
+			{ { Ty::V2, "x" }, { "x", Ty::Float } }, { { Ty::V2, "y" }, { "y", Ty::Float } }, { { Ty::V3, "x" }, { "x", Ty::Float } }, { { Ty::V3, "y" }, { "y", Ty::Float } }, { { Ty::V3, "z" }, { "z", Ty::Float } },
+			{ { Ty::V2I, "x" }, { "x", Ty::Int } }, { { Ty::V2I, "y" }, { "y", Ty::Int } }, { { Ty::V3I, "x" }, { "x", Ty::Int } }, { { Ty::V3I, "y" }, { "y", Ty::Int } }, { { Ty::V3I, "z" }, { "z", Ty::Int } },
+			{ { Ty::Color, "r" }, { "r", Ty::Float } }, { { Ty::Color, "g" }, { "g", Ty::Float } }, { { Ty::Color, "b" }, { "b", Ty::Float } }, { { Ty::Color, "a" }, { "a", Ty::Float } },
+			{ { Ty::Quat, "x" }, { "x", Ty::Float } }, { { Ty::Quat, "y" }, { "y", Ty::Float } }, { { Ty::Quat, "z" }, { "z", Ty::Float } }, { { Ty::Quat, "w" }, { "w", Ty::Float } },
+			{ { Ty::Rect2, "position" }, { "position", Ty::V2 } }, { { Ty::Rect2, "size" }, { "size", Ty::V2 } }, { { Ty::Aabb, "position" }, { "position", Ty::V3 } }, { { Ty::Aabb, "size" }, { "size", Ty::V3 } },
+			{ { Ty::T3D, "basis" }, { "basis", Ty::Basis } }, { { Ty::T3D, "origin" }, { "origin", Ty::V3 } },
+			{ { Ty::T2D, "x" }, { "columns[0]", Ty::V2 } }, { { Ty::T2D, "y" }, { "columns[1]", Ty::V2 } }, { { Ty::T2D, "origin" }, { "columns[2]", Ty::V2 } },
+			{ { Ty::Basis, "x" }, { "0", Ty::V3 } }, { { Ty::Basis, "y" }, { "1", Ty::V3 } }, { { Ty::Basis, "z" }, { "2", Ty::V3 } },
+		};
+		auto field = fields.find({ b.t, n });
+		if (field != fields.end()) {
+			const std::string &slot = field->second.first;
+			Ty ty = field->second.second;
+			bool column = b.t == Ty::Basis, scalar = numeric(ty);
+			std::string read = column ? ".get_column(" + slot + ")" : "." + slot;
+			std::string write = column ? ".set_column(" + slot + ", %v)" : read + " = " + (scalar ? "decltype(" + std::string(cty(b.t)) + "::" + slot + ")(%v)" : "%v");
+			E e{ scalar ? std::string(cty(ty)) + "(" + b.c + read + ")" : b.c + read, ty };
 			if (b.lv) {
-				e.set = "(" + b.c + "." + n + " = real_t(%v))";
+				e.set = "(" + b.c + write + ")";
+				e.lv = !scalar && !column;
 			} else if (!b.set.empty()) {
 				std::string v = temp();
-				e.set = "[&]() { " + std::string(cty(b.t)) + " " + v + " = " + b.c + "; " + v + "." + n + " = real_t(%v); " + subst(b.set, v) + "; }()";
+				e.set = "[&]() { " + std::string(cty(b.t)) + " " + v + " = " + b.c + "; " + v + write + "; " + subst(b.set, v) + "; }()";
 			}
 			return e;
 		}
@@ -2633,8 +2776,9 @@ class Compiler {
 		int line = ln();
 		std::string parallel_from, parallel_to, parallel_step;
 		std::string n = ident();
+		Ty annotated = Ty::Var;
 		if (eat(":")) {
-			parse_type();
+			annotated = parse_type();
 		}
 		expect("in");
 		std::string open;
@@ -2668,6 +2812,11 @@ class Compiler {
 				open = "{ " + std::string(cty(e.t)) + " " + c + " = " + e.c + ";\nfor (int64_t " + i + " = 0; " + i + " < " + c + ".size(); " + i + "++) {\n";
 				each = e.t == Ty::PF64 ? Ty::Float : e.t == Ty::PI64 ? Ty::Int : Ty::Var;
 				v = c + (e.t == Ty::Arr ? "[" + i + "]" : ".ptr()[" + i + "]");
+				Ty element = annotated != Ty::Var ? annotated : e.ref.elem_t;
+				if (e.t == Ty::Arr && element != Ty::Var) {
+					each = element;
+					v = unsafe ? unbox(v, cty(each)) : std::string("gn::cast<") + cty(each) + ">(" + v + ", Variant::" + vty(each) + ", " + L(line) + ")";
+				}
 			} else {
 				open = "{ Array " + c + " = gn::iter_list(" + conv(e, Ty::Var, line) + ", " + L(line) + ");\nfor (int64_t " + i + " = 0; " + i + " < " + c + ".size(); " + i + "++) {\n";
 				each = Ty::Var;
