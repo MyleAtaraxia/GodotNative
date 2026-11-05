@@ -28,7 +28,7 @@ using namespace godot;
 namespace {
 
 const char *GENERATED_DIR = "res://addons/godot_native/generated";
-const char *PROGRESS_SCRIPT = "res://addons/godot_native/GDProgress/addons/gd_progress/gd_progress.gd";
+const char *PROGRESS_SCRIPT = "res://addons/godot_native/GDProgress/gd_progress.gd";
 const char *PROGRESS_TASK = "GodotNative";
 
 std::string std_str(const String &s) {
