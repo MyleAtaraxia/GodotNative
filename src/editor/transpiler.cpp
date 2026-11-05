@@ -332,6 +332,8 @@ struct TypeRef {
 	bool any() const { return !builtin.empty() || !cls.empty() || !script.empty(); }
 };
 
+struct Member;
+
 struct E {
 	std::string c;
 	Ty t = Ty::Var;
@@ -343,6 +345,7 @@ struct E {
 	std::vector<std::pair<Ty, std::string>> items;
 	std::string raw;
 	Ty elem_t = Ty::Var;
+	Member *member = nullptr;
 };
 
 struct Param {
@@ -388,6 +391,7 @@ struct Member {
 	std::string getter, setter;
 	size_t init = 0;
 	int line = 0;
+	bool weak = false;
 };
 
 struct Const {
@@ -508,7 +512,16 @@ class Compiler {
 	OmpState omp;
 	size_t omp_scope = 0;
 	std::set<std::string> omp_writes;
-	std::set<std::string> demoted;
+	std::set<std::string> demoted, ref_demoted;
+	const Fn *inferring = nullptr;
+	bool return_seen = false, return_mixed = false, members_changed = false;
+	Ty return_t = Ty::Var;
+	TypeRef return_ref;
+	struct Narrow {
+		std::string name, key;
+		TypeRef ref;
+	};
+	std::vector<Narrow> pending_narrow;
 	const Fn *cur = nullptr;
 	std::string out;
 	int tmp = 0;
@@ -554,7 +567,7 @@ class Compiler {
 				return true;
 			}
 		}
-		return false;
+		return outer && outer->quiet_at(line);
 	}
 
 	void warn(int line, const std::string &m) {
@@ -1330,6 +1343,7 @@ class Compiler {
 		}
 		r = { "[&]() -> " + type + " { " + receiver(c, value, "const Variant &gn_r") + "return gn_t->m_" + n + "; } return " + slow + "; }()", m->t };
 		r.ref = m->ref;
+		r.member = const_cast<Member *>(m);
 		r.set = "[&]() { " + receiver(c, value, "Variant gn_r") + "gn_t->m_" + n + " = %v; return; } gn::set_named(gn_r, " + name + ", Variant(%v), " + L(line) + ");" + write_back(b, "gn_r") + " }()";
 		return true;
 	}
@@ -1494,6 +1508,9 @@ class Compiler {
 		std::string call = "gn::pcall<" + ret_cpp + ">(" + head + list + ")";
 		r = { ret_variant.empty() ? call : "Variant(" + call + ")", ret };
 		r.ref.builtin = ret_variant;
+		if (m.ret.rfind("typedarray::", 0) == 0 && classes.class_exists(m.ret.substr(12))) {
+			r.ref.elem_cls = m.ret.substr(12);
+		}
 		return true;
 	}
 
@@ -2144,7 +2161,9 @@ class Compiler {
 			if (cur->is_static) {
 				throw Err{ line, "cannot use instance member " + n + " from a static function" };
 			}
-			return through_accessors({ "m_" + n, m->t, "(m_" + n + " = %v)", true, "", m->ref }, *m, line);
+			E e = through_accessors({ "m_" + n, m->t, "(m_" + n + " = %v)", true, "", m->ref }, *m, line);
+			e.member = const_cast<Member *>(m);
+			return e;
 		}
 		if (const Const *c = find_const(n)) {
 			return { c->c, c->t };
@@ -2352,6 +2371,15 @@ class Compiler {
 				untyped(line, "'" + l.local + "' changes type, so it stays a Variant");
 				throw Retry{};
 			}
+			if (loc->weak && !r.ref.same(loc->ref)) {
+				ref_demoted.insert(loc->key);
+				throw Retry{};
+			}
+		}
+		if (l.member && l.member->weak && r.t != l.t) {
+			l.member->weak = false;
+			l.member->t = Ty::Var;
+			members_changed = true;
 		}
 		if (numeric(l.elem_t) && numeric(r.t)) {
 			r = { conv(r, l.elem_t, line), l.elem_t };
@@ -2364,9 +2392,40 @@ class Compiler {
 		scopes.back()[n] = { "l_" + n, ty, weak, key, ref };
 	}
 
+	void open_block() {
+		scopes.emplace_back();
+		for (const Narrow &n : pending_narrow) {
+			Local l = *find_local(n.name);
+			l.ref = n.ref;
+			l.weak = true;
+			l.key = n.key;
+			scopes.back()[n.name] = l;
+		}
+		pending_narrow.clear();
+	}
+
+	void narrow_test(size_t start) {
+		const size_t colon = p - 1;
+		if (t[start].k != TK::Id || t[start + 1].s != "is" || t[start + 2].s == "not") {
+			return;
+		}
+		const Local *l = find_local(t[start].s);
+		if (!l || l->t != Ty::Var) {
+			return;
+		}
+		p = start + 2;
+		Ty ty = parse_type();
+		bool only = p == colon;
+		p = colon + 1;
+		const std::string key = cur->name + "@" + t[start].s + "@is@" + std::to_string(t[start].line);
+		if (only && ty == Ty::Var && (!last_ref.cls.empty() || !last_ref.script.empty()) && !demoted.count(key) && !ref_demoted.count(key)) {
+			pending_narrow.push_back({ t[start].s, key, last_ref });
+		}
+	}
+
 	void block() {
 		if (tk().k != TK::NL && !(lambda_inline > 0 && p == lambda_end)) {
-			scopes.emplace_back();
+			open_block();
 			out += "{\n";
 			stmt();
 			out += "}\n";
@@ -2378,7 +2437,7 @@ class Compiler {
 			throw Err{ ln(), "expected an indented block" };
 		}
 		p++;
-		scopes.emplace_back();
+		open_block();
 		out += "{\n";
 		while (tk().k != TK::Dedent) {
 			stmt();
@@ -2424,12 +2483,15 @@ class Compiler {
 			ref = e.ref;
 		} else if (weak) {
 			ty = demoted.count(key) ? Ty::Var : e.t;
-			if (ty == Ty::Var) {
+			if (!demoted.count(key) && !ref_demoted.count(key)) {
+				ref = e.ref;
+			}
+			if (ty == Ty::Var && !ref.any()) {
 				untyped(line, "could not infer a type for '" + n + "', so it stays a Variant");
 			}
 		}
 		std::string v = guarded(e, ty, ref, line);
-		declare(n, ty, weak && ty != Ty::Var, key, ref);
+		declare(n, ty, weak && (ty != Ty::Var || ref.any()), key, ref);
 		out += std::string(cty(ty)) + " l_" + n + " = " + v + ";\n";
 	}
 
@@ -2846,9 +2908,13 @@ class Compiler {
 		std::string parallel_from, parallel_to, parallel_step;
 		std::string n = ident();
 		Ty annotated = Ty::Var;
+		TypeRef each_ref;
 		if (eat(":")) {
 			annotated = parse_type();
+			each_ref = last_ref;
 		}
+		const bool held = each_ref.any();
+		const std::string key = cur->name + "@" + n + "@" + std::to_string(line);
 		expect("in");
 		std::string open;
 		Ty each = Ty::Int;
@@ -2886,6 +2952,9 @@ class Compiler {
 					each = element;
 					v = unsafe ? unbox(v, cty(each)) : std::string("gn::cast<") + cty(each) + ">(" + v + ", Variant::" + vty(each) + ", " + L(line) + ")";
 				}
+				if (e.t == Ty::Arr && each == Ty::Var && !held && !e.ref.elem_cls.empty() && !demoted.count(key) && !ref_demoted.count(key)) {
+					each_ref.cls = e.ref.elem_cls;
+				}
 			} else {
 				open = "{ Array " + c + " = gn::iter_list(" + conv(e, Ty::Var, line) + ", " + L(line) + ");\nfor (int64_t " + i + " = 0; " + i + " < " + c + ".size(); " + i + "++) {\n";
 				each = Ty::Var;
@@ -2902,7 +2971,10 @@ class Compiler {
 		}
 		out += open;
 		scopes.emplace_back();
-		declare(n, each, false, "");
+		if (held && each == Ty::Var) {
+			v = guard(v, each_ref, L(line));
+		}
+		declare(n, each, !held && each_ref.any(), key, each == Ty::Var ? each_ref : TypeRef());
 		out += std::string(cty(each)) + " l_" + n + " = " + v + ";\n";
 		omp.loops++;
 		block();
@@ -3004,8 +3076,10 @@ class Compiler {
 	}
 
 	void if_stmt() {
+		const size_t start = p;
 		E c = expr();
 		expect(":");
+		narrow_test(start);
 		out += "if (" + truth(c) + ") ";
 		block();
 		int closes = 0;
@@ -3106,11 +3180,18 @@ class Compiler {
 					throw Err{ line, "function '" + cur->name + "' must return a value" };
 				}
 				p++;
+				return_mixed = return_mixed || cur == inferring;
 				out += cur->coroutine ? "co_return Variant();\n" : cur->ret == Ty::Void ? "return;\n" : "return {};\n";
 				return;
 			}
 			E e = expr();
 			nl();
+			if (cur == inferring) {
+				return_mixed = return_mixed || e.t == Ty::Void || (return_seen && (e.t != return_t || !e.ref.same(return_ref)));
+				return_seen = true;
+				return_t = e.t;
+				return_ref = e.ref;
+			}
 			if (cur->declared == Ty::Void && e.t != Ty::Void) {
 				throw Err{ line, "void function '" + cur->name + "' cannot return a value" };
 			}
@@ -3622,7 +3703,8 @@ class Compiler {
 					property_block(m);
 				}
 				if (!m.declared) {
-					untyped(line, "member '" + m.name + "' has no type and stays a Variant");
+					untyped(line, "member '" + m.name + "' has no type");
+					m.weak = m.init && !m.is_static && !m.onready && m.getter.empty() && m.setter.empty();
 				}
 				members.push_back(m);
 			} else if (eat("func")) {
@@ -3672,7 +3754,7 @@ class Compiler {
 					f.ret_ref = last_ref;
 					f.annotated = true;
 				} else {
-					untyped(line, "function '" + f.name + "' has no return type and returns a Variant");
+					untyped(line, "function '" + f.name + "' has no return type");
 				}
 				if (f.abstract) {
 					nl();
@@ -3761,6 +3843,26 @@ class Compiler {
 		return body.find("owner") == std::string::npos ? "" : "Object *owner = gn::script_object(GN_FILE);\n";
 	}
 
+	bool infer_function(Fn &f, bool wanted) {
+		inferring = wanted ? &f : nullptr;
+		return_seen = return_mixed = false;
+		try {
+			emit_fn(f);
+		} catch (const Err &) {
+			return_mixed = true;
+		}
+		inferring = nullptr;
+		if (!wanted) {
+			return false;
+		}
+		Ty ty = return_seen && !return_mixed ? return_t : Ty::Var;
+		TypeRef ref = ty == Ty::Var && return_seen && !return_mixed ? return_ref : TypeRef();
+		bool changed = ty != f.ret || !ref.same(f.ret_ref);
+		f.ret = ty;
+		f.ret_ref = ref;
+		return changed;
+	}
+
 	std::string emit_fn(const Fn &f) {
 		if (f.abstract) {
 			return "gn::fail(\"Cannot call abstract function '" + f.name + "'.\", " + L(f.line) + ");\n";
@@ -3809,6 +3911,66 @@ class Compiler {
 	}
 
 public:
+	void stop_member_inference() {
+		for (Member &m : members) {
+			m.weak = false;
+		}
+	}
+
+	void demote_members(const std::set<std::string> &written) {
+		for (Member &m : members) {
+			m.weak = m.weak && !written.count(m.name);
+		}
+	}
+
+	bool infer_members() {
+		bool changed = false;
+		for (Member &m : members) {
+			if (!m.weak) {
+				continue;
+			}
+			cur = &init_fn;
+			scopes.assign(1, {});
+			out.clear();
+			p = m.init;
+			Ty ty = Ty::Var;
+			try {
+				ty = expr().t;
+			} catch (const Err &) {
+			}
+			ty = ty == Ty::Void ? Ty::Var : ty;
+			changed = changed || ty != m.t;
+			m.t = ty;
+		}
+		return changed;
+	}
+
+	bool infer_bodies(const std::set<std::string> &virtuals) {
+		bool changed = false;
+		members_changed = false;
+		for (Fn &f : fns) {
+			if (f.abstract) {
+				continue;
+			}
+			bool wanted = !f.annotated && !f.coroutine && !f.async_shape && f.accessor_of.empty() && !virtuals.count(f.name) && f.name != "_init" && body_returns(f.body);
+			changed = infer_function(f, wanted) || changed;
+		}
+		return changed || members_changed;
+	}
+
+	void finish_inference(bool settled) {
+		for (Fn &f : fns) {
+			if (!f.annotated && !f.coroutine && !f.async_shape) {
+				f.ret = settled ? f.ret : Ty::Var;
+				f.ret_ref = settled ? f.ret_ref : TypeRef();
+				f.declared = f.ret;
+			}
+		}
+		for (Member &m : members) {
+			m.t = m.weak && !settled ? Ty::Var : m.t;
+		}
+	}
+
 	Compiler *parent = nullptr, *outer = nullptr;
 	int untyped_mode = Options::UNTYPED_WARN;
 	const std::map<std::string, std::unique_ptr<Compiler>> *project = nullptr;
@@ -4219,6 +4381,56 @@ class Project {
 		return r;
 	}
 
+	// shortcut: a member is seen as written only through `.name =` or the name as a string, so a computed property name that stores another type fails loudly at runtime, track those if it comes up
+	bool collect_written(const std::string &src, std::set<std::string> &written) const {
+		static const std::set<std::string> writes = { "=", "+=", "-=", "*=", "/=", "%=", "**=", "&=", "|=", "^=", "<<=", ">>=" };
+		std::vector<Tok> tokens;
+		try {
+			tokens = tokenize(src);
+		} catch (const Err &) {
+			return false;
+		}
+		for (size_t q = 0; q < tokens.size(); q++) {
+			if (tokens[q].k == TK::Str) {
+				written.insert(tokens[q].s);
+			} else if (q + 2 < tokens.size() && tokens[q].k == TK::Op && tokens[q].s == "." && tokens[q + 2].k == TK::Op && writes.count(tokens[q + 2].s)) {
+				written.insert(tokens[q + 1].s);
+			}
+		}
+		return true;
+	}
+
+	void infer_types(const std::vector<std::string> &all, const std::vector<std::pair<std::string, std::string>> &embedded, const std::set<std::string> &virtuals) {
+		std::set<std::string> written;
+		bool readable = true;
+		for (const std::string &path : all) {
+			std::string src;
+			readable = query.read(path, src) && collect_written(src, written) && readable;
+		}
+		for (const auto &e : embedded) {
+			readable = collect_written(e.second, written) && readable;
+		}
+		bool settled = false;
+		for (Compiler *c : order) {
+			if (!readable) {
+				c->stop_member_inference();
+			}
+			c->demote_members(written);
+		}
+		for (int round = 0; round < 8 && !settled; round++) {
+			settled = true;
+			for (Compiler *c : order) {
+				settled = !c->infer_members() && settled;
+			}
+			for (Compiler *c : order) {
+				settled = !c->infer_bodies(virtuals) && settled;
+			}
+		}
+		for (Compiler *c : order) {
+			c->finish_inference(settled);
+		}
+	}
+
 	void load_descendants(const std::vector<std::string> &all, Output &r) {
 		std::map<std::string, std::set<std::string>> waiting;
 		for (const std::string &path : all) {
@@ -4287,6 +4499,7 @@ public:
 				c->collect_virtuals(virtuals);
 			});
 		}
+		infer_types(all, embedded, virtuals);
 		for (Compiler *c : order) {
 			std::string h, cpp;
 			guarded(c, [&]() { c->emit(virtuals, h, cpp); });
