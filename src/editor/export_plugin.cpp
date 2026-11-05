@@ -1,26 +1,21 @@
 #include "pragma_editor.h"
 
 #include <godot_cpp/classes/class_db_singleton.hpp>
-#include <godot_cpp/classes/control.hpp>
 #include <godot_cpp/classes/dir_access.hpp>
 #include <godot_cpp/classes/display_server.hpp>
 #include <godot_cpp/classes/editor_export_platform.hpp>
 #include <godot_cpp/classes/engine.hpp>
 #include <godot_cpp/classes/editor_export_plugin.hpp>
-#include <godot_cpp/classes/editor_interface.hpp>
 #include <godot_cpp/classes/editor_plugin.hpp>
 #include <godot_cpp/classes/editor_plugin_registration.hpp>
 #include <godot_cpp/classes/engine.hpp>
 #include <godot_cpp/classes/file_access.hpp>
-#include <godot_cpp/classes/font.hpp>
 #include <godot_cpp/classes/gd_script.hpp>
 #include <godot_cpp/classes/json.hpp>
 #include <godot_cpp/classes/os.hpp>
 #include <godot_cpp/classes/project_settings.hpp>
-#include <godot_cpp/classes/rendering_server.hpp>
-#include <godot_cpp/classes/theme.hpp>
-#include <godot_cpp/classes/time.hpp>
-#include <godot_cpp/classes/window.hpp>
+#include <godot_cpp/classes/resource_loader.hpp>
+#include <godot_cpp/classes/script.hpp>
 #include <godot_cpp/core/class_db.hpp>
 #include <godot_cpp/variant/utility_functions.hpp>
 
@@ -33,6 +28,8 @@ using namespace godot;
 namespace {
 
 const char *GENERATED_DIR = "res://addons/godot_native/generated";
+const char *PROGRESS_SCRIPT = "res://addons/godot_native/GDProgress/addons/gd_progress/gd_progress.gd";
+const char *PROGRESS_TASK = "GodotNative";
 
 std::string std_str(const String &s) {
 	return s.utf8().get_data();
@@ -541,58 +538,6 @@ bool sync_generated(const gn::Output &r, int &sources) {
 	return changed;
 }
 
-class BuildPopup {
-	Window *window = nullptr;
-	Control *canvas = nullptr;
-	Ref<Font> font;
-	int font_size = 16;
-	float scale = 1.0;
-	Color base, accent, text, muted;
-	Size2 size;
-
-public:
-	BuildPopup() {
-		EditorInterface *editor = EditorInterface::get_singleton();
-		Ref<Theme> theme = editor->get_editor_theme();
-		scale = editor->get_editor_scale();
-		font = theme->get_font("main", "EditorFonts");
-		font_size = theme->get_font_size("main_size", "EditorFonts");
-		base = theme->get_color("base_color", "Editor");
-		accent = theme->get_color("accent_color", "Editor");
-		text = theme->get_color("font_color", "Editor");
-		muted = theme->get_color("font_placeholder_color", "Editor");
-		size = Size2(460, 112) * scale;
-		window = memnew(Window);
-		window->set_title("GodotNative");
-		window->set_flag(Window::FLAG_RESIZE_DISABLED, true);
-		canvas = memnew(Control);
-		window->add_child(canvas);
-		window->popup_exclusive_centered(editor->get_base_control(), Vector2i(size));
-	}
-
-	~BuildPopup() {
-		window->hide();
-		window->queue_free();
-	}
-
-	void draw(const String &status, double ratio, int64_t seconds) {
-		RenderingServer *rs = RenderingServer::get_singleton();
-		RID item = canvas->get_canvas_item();
-		float pad = 16 * scale, line = font_size * 1.5f;
-		float width = size.x - pad * 2;
-		rs->canvas_item_clear(item);
-		rs->canvas_item_add_rect(item, Rect2(Vector2(), size), base);
-		font->draw_string(item, Vector2(pad, pad + font_size), "Compiling native scripts", HORIZONTAL_ALIGNMENT_LEFT, width, font_size, text);
-		font->draw_string(item, Vector2(pad, pad + font_size), itos(seconds) + " s", HORIZONTAL_ALIGNMENT_RIGHT, width, font_size, muted);
-		font->draw_string(item, Vector2(pad, pad + font_size + line), status, HORIZONTAL_ALIGNMENT_LEFT, width, font_size, muted);
-		Rect2 bar(pad, size.y - pad - 8 * scale, width, 8 * scale);
-		rs->canvas_item_add_rect(item, bar, Color(text, 0.15f));
-		rs->canvas_item_add_rect(item, Rect2(bar.position, Vector2(bar.size.x * ratio, bar.size.y)), accent);
-		DisplayServer::get_singleton()->process_events();
-		rs->force_draw();
-	}
-};
-
 String complete_lines(const Ref<FileAccess> &pipe, PackedByteArray &pending, bool flush) {
 	for (;;) {
 		PackedByteArray chunk = pipe->get_buffer(65536);
@@ -610,7 +555,12 @@ String complete_lines(const Ref<FileAccess> &pipe, PackedByteArray &pending, boo
 	return text;
 }
 
-int run_with_popup(const PackedStringArray &args, const String &root, const String &target, int sources, Array &output) {
+Ref<Script> gd_progress() {
+	ResourceLoader *loader = ResourceLoader::get_singleton();
+	return loader->exists(PROGRESS_SCRIPT) ? Ref<Script>(loader->load(PROGRESS_SCRIPT)) : Ref<Script>();
+}
+
+int run_with_progress(const Ref<Script> &progress, const PackedStringArray &args, const String &root, const String &target, int sources, Array &output) {
 	OS::get_singleton()->set_environment("PYTHONUNBUFFERED", "1");
 	Dictionary process = OS::get_singleton()->execute_with_pipe(scons_path(), args, false);
 	OS::get_singleton()->unset_environment("PYTHONUNBUFFERED");
@@ -619,12 +569,10 @@ int run_with_popup(const PackedStringArray &args, const String &root, const Stri
 	}
 	Ref<FileAccess> out = process["stdio"], err = process["stderr"];
 	int64_t pid = process["pid"];
-	BuildPopup popup;
 	String log, status = "Starting SCons";
 	PackedByteArray pending_out, pending_err;
 	String suffix = library_path(target).get_file().trim_prefix("godot_native").get_basename();
 	std::vector<String> objects;
-	uint64_t start = Time::get_singleton()->get_ticks_msec();
 	auto read = [&](bool flush) {
 		String text = complete_lines(out, pending_out, flush) + complete_lines(err, pending_err, flush);
 		for (const String &raw : text.split("\n", false)) {
@@ -644,10 +592,10 @@ int run_with_popup(const PackedStringArray &args, const String &root, const Stri
 		read(false);
 		int finished = 0;
 		for (const String &object : objects) {
-			finished += FileAccess::file_exists(object + String(".obj")) || FileAccess::file_exists(object + String(".os"));
+			finished += FileAccess::file_exists(object + String(".o")) || FileAccess::file_exists(object + String(".obj")) || FileAccess::file_exists(object + String(".os"));
 		}
 		double ratio = MIN(double(finished) / (MAX(sources, int(objects.size())) + 1), 0.95);
-		popup.draw(status, ratio, (Time::get_singleton()->get_ticks_msec() - start) / 1000);
+		progress->call("update", PROGRESS_TASK, status, ratio);
 		OS::get_singleton()->delay_msec(33);
 	}
 	read(true);
@@ -728,8 +676,8 @@ bool compile_native(const String &target, bool show_progress = false) {
 	int jobs = int_setting("build/jobs", 8);
 	jobs = jobs > 0 ? jobs : OS::get_singleton()->get_processor_count();
 	PackedStringArray args = { "-C", root, "target=" + target, "project=" + project_dir, "api_version=" + native_api(), "-j" + String::num_int64(jobs) };
-	bool popup = show_progress && DisplayServer::get_singleton()->get_name() != "headless";
-	int code = popup ? run_with_popup(args, root, target, sources, output) : OS::get_singleton()->execute(scons_path(), args, output, true);
+	Ref<Script> progress = show_progress && DisplayServer::get_singleton()->get_name() != "headless" ? gd_progress() : Ref<Script>();
+	int code = progress.is_valid() ? run_with_progress(progress, args, root, target, sources, output) : OS::get_singleton()->execute(scons_path(), args, output, true);
 	if (code != 0) {
 		UtilityFunctions::push_error("[GodotNative] scons failed, ran ", scons_path(), ":\n", output);
 		return false;
@@ -780,21 +728,33 @@ protected:
 
 public:
 	bool _build() override {
+		bool ok = true;
 		if (int_setting("build/native_in_debug_runs", 1)) {
-			return compile_native("template_debug", true);
-		}
-		if (!FileAccess::file_exists(library_path("template_debug"))) {
+			ok = compile_native("template_debug", true);
+		} else if (!FileAccess::file_exists(library_path("template_debug"))) {
 			compile_native("template_debug", true);
 		}
-		return true;
+		Ref<Script> progress = gd_progress();
+		if (progress.is_valid()) {
+			progress->call("finish", PROGRESS_TASK);
+		}
+		return ok;
 	}
 	void _enter_tree() override {
 		register_settings();
+		Ref<Script> progress = gd_progress();
+		if (progress.is_valid()) {
+			progress->call("add_task", PROGRESS_TASK);
+		}
 		exporter.instantiate();
 		add_export_plugin(exporter);
 		gn_pragma_editor_start();
 	}
 	void _exit_tree() override {
+		Ref<Script> progress = gd_progress();
+		if (progress.is_valid()) {
+			progress->call("remove_task", PROGRESS_TASK);
+		}
 		gn_pragma_editor_stop();
 		remove_export_plugin(exporter);
 		exporter.unref();

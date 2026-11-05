@@ -37,6 +37,7 @@ jobs:
           addon=package/addons/godot_native
           mkdir -p package/addons
           cp -r demo/addons/godot_native package/addons/
+          rm -f package/addons/godot_native/GDProgress/.git
           scons -j4 target=editor project=package
           find "$addon/bin" -type f ! -name '*.dll' -delete
           mkdir -p "$addon/build/godot-cpp"
