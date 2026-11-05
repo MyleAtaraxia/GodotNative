@@ -78,3 +78,50 @@ func test_narrowing() -> void:
 	assert_eq(source.not_narrowed(node), 1)
 	assert_eq(source.not_narrowed(1), "other")
 	node.free()
+
+
+func test_parameters_seen_at_call_sites() -> void:
+	assert_eq(source.uses_plus_one(), 2)
+	assert_eq(source.plus_one(1), 2)
+	assert_eq(source.uses_fib(), 55)
+	assert_eq(source.fib(10), 55)
+	assert_eq(source.uses_static(), 2)
+	assert_eq(source.uses_packed_size(), 2)
+	assert_eq(source.uses_pushed_to(), [1])
+
+
+func test_parameters_called_with_another_type() -> void:
+	assert_eq(source.plus_one(1.5), 2.5)
+	assert_eq(source.plus_one(2.0), 3.0)
+	assert_eq(source.fib(2.0), 1.0)
+	assert_eq(source.static_plus_one(1.5), 2.5)
+	assert_eq(source.packed_size([1, 2, 3]), 3)
+	assert_eq(source.packed_size("abcd".to_utf8_buffer()), 4)
+
+
+func test_parameters_written_in_the_body() -> void:
+	assert_eq(source.uses_reassigned(), ["text", 0])
+	assert_eq(source.reassigned(1), "text")
+	assert_eq(source.counted_down(2.5), -0.5)
+
+
+func test_parameter_defaults() -> void:
+	assert_eq(source.with_default(), 4)
+	assert_eq(source.with_default(3), 6)
+	assert_eq(source.with_default(1.5), 3.0)
+
+
+func test_parameters_with_two_types() -> void:
+	assert_eq(source.uses_two_kinds(), [1, "a"])
+
+
+func test_guess_that_cannot_compile_is_dropped() -> void:
+	var node := Node.new()
+	node.add_child(Node.new())
+	assert_eq(source.uses_only_nodes(), 7)
+	assert_eq(source.only_nodes(node), 1)
+	node.free()
+
+
+func test_parameters_reach_overrides() -> void:
+	assert_eq(source.uses_scaled_by(), [2, 4])

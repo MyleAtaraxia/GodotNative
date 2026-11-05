@@ -10,6 +10,7 @@
 #include <cstring>
 #include <malloc.h>
 #include <mutex>
+#include <string>
 #include <vector>
 
 using namespace godot;
@@ -246,7 +247,8 @@ Registrar::Registrar(const Class *c) {
 }
 
 void fail(const char *msg, const Loc &loc) {
-	_err_print_error(loc.func, loc.file, loc.line, msg, false, false);
+	std::string func = loc.func;
+	_err_print_error(func.substr(0, func.rfind("__typed")).c_str(), loc.file, loc.line, msg, false, false);
 	throw Abort{};
 }
 

@@ -6,9 +6,15 @@ class Plain:
 	func area():
 		return 1
 
+	func scaled_area(by):
+		return by * 1
+
 class Fancy extends Plain:
 	func area():
 		return "big"
+
+	func scaled_area(by):
+		return by * 2
 
 var counter = 0
 var ratio = 0.5
@@ -143,3 +149,92 @@ func integer_division():
 func add_word(word: String):
 	words.append(word)
 	return words.size()
+
+
+func plus_one(value):
+	return value + 1
+
+
+func uses_plus_one():
+	return plus_one(1)
+
+
+func reassigned(value):
+	value = "text"
+	return value
+
+
+func counted_down(value):
+	while value > 0:
+		value -= 1
+	return value
+
+
+func uses_reassigned():
+	return [reassigned(1), counted_down(3)]
+
+
+func with_default(value = 2):
+	return value * 2
+
+
+func two_kinds(value):
+	return value
+
+
+func uses_two_kinds():
+	return [two_kinds(1), two_kinds("a")]
+
+
+func only_nodes(value):
+	if value is Node:
+		return value.get_child_count()
+	return value
+
+
+func uses_only_nodes():
+	return only_nodes(7)
+
+
+func scaled_by(item: Plain):
+	return item.scaled_area(2)
+
+
+func uses_scaled_by():
+	return [scaled_by(Plain.new()), scaled_by(Fancy.new())]
+
+
+func fib(n):
+	if n < 2:
+		return n
+	return fib(n - 1) + fib(n - 2)
+
+
+func uses_fib():
+	return fib(10)
+
+
+static func static_plus_one(value):
+	return value + 1
+
+
+func uses_static():
+	return static_plus_one(1)
+
+
+func packed_size(values):
+	return values.size()
+
+
+func uses_packed_size():
+	return packed_size(PackedInt32Array([1, 2]))
+
+
+func pushed_to(values):
+	values.append(1)
+
+
+func uses_pushed_to():
+	var list = []
+	pushed_to(list)
+	return list

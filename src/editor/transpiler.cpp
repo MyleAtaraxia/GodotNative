@@ -348,11 +348,28 @@ struct E {
 	Member *member = nullptr;
 };
 
+using CallVotes = std::map<std::string, std::map<size_t, std::set<Ty>>>;
+
 struct Param {
 	std::string name;
 	Ty t = Ty::Var;
 	TypeRef ref;
 	size_t init = 0;
+	bool inferred = false;
+	Ty guess = Ty::Void;
+	std::string guess_builtin;
+	void vote(Ty ty, const std::string &builtin) {
+		if (!inferred || ty == Ty::Void || (ty == Ty::Var && builtin.empty())) {
+			return;
+		}
+		if (guess == Ty::Void) {
+			guess = ty;
+			guess_builtin = builtin;
+		} else if (guess != ty || guess_builtin != builtin) {
+			inferred = false;
+		}
+	}
+	bool guessed() const { return inferred && guess != Ty::Void; }
 };
 
 struct Fn {
@@ -368,7 +385,11 @@ struct Fn {
 	bool abstract = false;
 	bool is_static = false;
 	bool annotated = false;
+	bool clone = false;
+	bool is_virtual = false;
+	std::shared_ptr<Fn> typed;
 	std::string accessor_of;
+	std::string key() const { return clone ? name + "+" : name; }
 	int required() const {
 		int n = 0;
 		for (const Param &a : params) {
@@ -514,6 +535,7 @@ class Compiler {
 	std::set<std::string> omp_writes;
 	std::set<std::string> demoted, ref_demoted;
 	const Fn *inferring = nullptr;
+	bool observing = false, dry_failed = false;
 	bool return_seen = false, return_mixed = false, members_changed = false;
 	Ty return_t = Ty::Var;
 	TypeRef return_ref;
@@ -1274,15 +1296,38 @@ class Compiler {
 		if (cur->is_static && !f->is_static) {
 			throw Err{ line, "cannot call instance function " + f->name + " from a static function" };
 		}
-		std::string s = "f_" + f->name + "(";
+		const Fn *g = callee(f, a);
+		std::string s = "f_" + f->name + (g->clone ? "__typed(" : "(");
 		for (size_t i = 0; i < a.size(); i++) {
-			s += (i ? ", " : "") + guarded(a[i], f->params[i].t, f->params[i].ref, line);
+			s += (i ? ", " : "") + guarded(a[i], g->params[i].t, g->params[i].ref, line);
 		}
-		E e{ s + ")", f->ret };
+		E e{ s + ")", g->ret };
 		if (!f->async_shape) {
-			e.ref = f->ret_ref;
+			e.ref = g->ret_ref;
+		}
+		if (g == cur && g == inferring && return_seen && !return_mixed) {
+			e.t = return_t;
+			e.ref = return_ref;
 		}
 		return e;
+	}
+
+	const Fn *callee(const Fn *f, const std::vector<E> &a) {
+		if (observing) {
+			for (size_t i = 0; i < a.size(); i++) {
+				const_cast<Fn *>(f)->params[i].vote(a[i].t, a[i].ref.builtin);
+			}
+		}
+		if (!f->typed || f->is_virtual || a.size() != f->params.size()) {
+			return f;
+		}
+		for (size_t i = 0; i < a.size(); i++) {
+			const Param &c = f->typed->params[i];
+			if (c.guessed() && (a[i].t != c.t || a[i].ref.builtin != c.ref.builtin)) {
+				return f;
+			}
+		}
+		return f->typed.get();
 	}
 
 	const Compiler *script_of(const E &b) {
@@ -1306,27 +1351,28 @@ class Compiler {
 		if (!f || f->is_static || f->abstract || f->coroutine || f->async_shape || a.size() != f->params.size()) {
 			return false;
 		}
+		const Fn *g = callee(f, a);
 		std::string list, seen = b.c;
 		for (size_t i = 0; i < a.size(); i++) {
-			list += (i ? ", " : "") + guarded(a[i], f->params[i].t, f->params[i].ref, line);
+			list += (i ? ", " : "") + guarded(a[i], g->params[i].t, g->params[i].ref, line);
 			seen += a[i].c;
 		}
 		if (seen.find("co_await") != std::string::npos) {
 			return false;
 		}
 		std::string head = receiver(c, conv(b, Ty::Var, line), "const Variant &gn_r");
-		std::string call = "gn_t->f_" + n + "(" + list + ")";
+		std::string call = "gn_t->f_" + n + (g->clone ? "__typed(" : "(") + list + ")";
 		std::string slow = "gn::mcall(gn_r, GN_SN(\"" + n + "\"), {" + var_args(a, line) + "}, " + L(line) + ")";
-		if (f->ret == Ty::Void) {
+		if (g->ret == Ty::Void) {
 			r = { "[&]() { " + head + call + "; return; } " + slow + "; }()", Ty::Void };
 			return true;
 		}
-		std::string type = cty(f->ret);
-		if (f->ret != Ty::Var) {
-			slow = unsafe ? unbox(slow, type) : "gn::cast<" + type + ">(" + slow + ", Variant::" + vty(f->ret) + ", " + L(line) + ")";
+		std::string type = cty(g->ret);
+		if (g->ret != Ty::Var) {
+			slow = unsafe ? unbox(slow, type) : "gn::cast<" + type + ">(" + slow + ", Variant::" + vty(g->ret) + ", " + L(line) + ")";
 		}
-		r = { "[&]() -> " + type + " { " + head + "return " + call + "; } return " + slow + "; }()", f->ret };
-		r.ref = f->ret_ref;
+		r = { "[&]() -> " + type + " { " + head + "return " + call + "; } return " + slow + "; }()", g->ret };
+		r.ref = g->ret_ref;
 		return true;
 	}
 
@@ -1833,10 +1879,14 @@ class Compiler {
 					list += (list.empty() ? "" : ", ") + direct->second.first + "(" + e.c + ")";
 				}
 				r = { (ty == Ty::Var ? "Variant(" : "") + n + "(" + list + ")" + (ty == Ty::Var ? ")" : ""), ty };
+				if (ty == Ty::Var) {
+					r.ref.builtin = b->second;
+				}
 				return true;
 			}
 			if (ty == Ty::Var) {
 				r = { "gn::construct(Variant::" + b->second + ", {" + var_args(a, line) + "}, " + L(line) + ")", Ty::Var };
+				r.ref.builtin = b->second;
 				return true;
 			}
 			bool vector = (ty == Ty::V3 || ty == Ty::V2) && a.size() != 1;
@@ -2368,7 +2418,9 @@ class Compiler {
 			const Local *loc = find_local(l.local);
 			if (loc->weak && r.t != loc->t) {
 				demoted.insert(loc->key);
-				untyped(line, "'" + l.local + "' changes type, so it stays a Variant");
+				if (!cur->clone) {
+					untyped(line, "'" + l.local + "' changes type, so it stays a Variant");
+				}
 				throw Retry{};
 			}
 			if (loc->weak && !r.ref.same(loc->ref)) {
@@ -2417,7 +2469,7 @@ class Compiler {
 		Ty ty = parse_type();
 		bool only = p == colon;
 		p = colon + 1;
-		const std::string key = cur->name + "@" + t[start].s + "@is@" + std::to_string(t[start].line);
+		const std::string key = cur->key() + "@" + t[start].s + "@is@" + std::to_string(t[start].line);
 		if (only && ty == Ty::Var && (!last_ref.cls.empty() || !last_ref.script.empty()) && !demoted.count(key) && !ref_demoted.count(key)) {
 			pending_narrow.push_back({ t[start].s, key, last_ref });
 		}
@@ -2476,7 +2528,7 @@ class Compiler {
 		}
 		E e = expr();
 		nl();
-		std::string key = cur->name + "@" + n + "@" + std::to_string(line);
+		std::string key = cur->key() + "@" + n + "@" + std::to_string(line);
 		bool weak = !typed && !infer;
 		if (infer) {
 			ty = e.t;
@@ -2914,7 +2966,7 @@ class Compiler {
 			each_ref = last_ref;
 		}
 		const bool held = each_ref.any();
-		const std::string key = cur->name + "@" + n + "@" + std::to_string(line);
+		const std::string key = cur->key() + "@" + n + "@" + std::to_string(line);
 		expect("in");
 		std::string open;
 		Ty each = Ty::Int;
@@ -3740,8 +3792,9 @@ class Compiler {
 							p++;
 						}
 					}
+					a.inferred = !typed;
 					if (!typed) {
-						untyped(line, "parameter '" + a.name + "' has no type and stays a Variant");
+						untyped(line, "parameter '" + a.name + "' has no type");
 					}
 					f.params.push_back(a);
 					if (!eat(",")) {
@@ -3845,11 +3898,11 @@ class Compiler {
 
 	bool infer_function(Fn &f, bool wanted) {
 		inferring = wanted ? &f : nullptr;
-		return_seen = return_mixed = false;
+		return_seen = return_mixed = dry_failed = false;
 		try {
 			emit_fn(f);
 		} catch (const Err &) {
-			return_mixed = true;
+			return_mixed = dry_failed = true;
 		}
 		inferring = nullptr;
 		if (!wanted) {
@@ -3861,6 +3914,10 @@ class Compiler {
 		f.ret = ty;
 		f.ret_ref = ref;
 		return changed;
+	}
+
+	std::string param_key(const Fn &f, const Param &a) const {
+		return f.key() + "@param@" + a.name;
 	}
 
 	std::string emit_fn(const Fn &f) {
@@ -3878,7 +3935,11 @@ class Compiler {
 				scopes.clear();
 				scopes.emplace_back();
 				for (const Param &a : f.params) {
-					declare(a.name, a.t, false, "", a.ref);
+					const std::string key = param_key(f, a);
+					const bool held = f.clone && a.guessed();
+					const Ty ty = held && demoted.count(key) ? Ty::Var : a.t;
+					const TypeRef ref = held && ref_demoted.count(key) ? TypeRef() : a.ref;
+					declare(a.name, ty, held && (ty != Ty::Var || ref.any()), key, ref);
 				}
 				p = f.body;
 				scopes.emplace_back();
@@ -3952,10 +4013,111 @@ public:
 			if (f.abstract) {
 				continue;
 			}
-			bool wanted = !f.annotated && !f.coroutine && !f.async_shape && f.accessor_of.empty() && !virtuals.count(f.name) && f.name != "_init" && body_returns(f.body);
-			changed = infer_function(f, wanted) || changed;
+			vote_defaults(f);
+			bool plain = !f.annotated && !f.coroutine && !f.async_shape && f.accessor_of.empty() && f.name != "_init" && body_returns(f.body);
+			changed = infer_function(f, plain && !virtuals.count(f.name)) || changed;
+			if (f.typed) {
+				changed = infer_function(*f.typed, plain) || changed;
+				for (size_t i = 0; i < f.params.size(); i++) {
+					const std::string key = param_key(*f.typed, f.params[i]);
+					f.params[i].inferred = f.params[i].inferred && !dry_failed && !demoted.count(key) && !ref_demoted.count(key);
+				}
+			}
 		}
 		return changed || members_changed;
+	}
+
+	void vote_defaults(Fn &f) {
+		cur = &f;
+		scopes.assign(1, {});
+		for (Param &a : f.params) {
+			if (a.init && a.inferred) {
+				p = a.init;
+				try {
+					E value = expr();
+					a.vote(value.t, value.ref.builtin);
+				} catch (const Err &) {
+				}
+			}
+			declare(a.name, a.t, false, "", a.ref);
+		}
+		out.clear();
+		scopes.assign(1, {});
+	}
+
+	void prepare_parameters(const std::set<std::string> &virtuals) {
+		observing = true;
+		for (Fn &f : fns) {
+			f.is_virtual = virtuals.count(f.name) > 0;
+			NativeMember engine = f.name[0] == '_' ? classes.method(native(), f.name) : NativeMember();
+			if (engine.found && engine.args.size() == f.params.size()) {
+				for (size_t i = 0; i < f.params.size(); i++) {
+					f.params[i].vote(engine.args[i], "");
+				}
+			}
+		}
+	}
+
+	bool update_clones(const CallVotes &calls) {
+		bool changed = false;
+		for (Fn &f : fns) {
+			if (f.abstract || f.coroutine || f.async_shape || !f.accessor_of.empty() || f.name == "_init") {
+				continue;
+			}
+			auto found = calls.find(f.name);
+			if (found != calls.end()) {
+				for (const auto &at : found->second) {
+					if (at.first < f.params.size() && f.params[at.first].guess == Ty::Void && at.second.size() == 1) {
+						f.params[at.first].vote(*at.second.begin(), "");
+					}
+				}
+			}
+			std::vector<Param> params = f.params;
+			bool any = false, same = f.typed != nullptr;
+			for (size_t i = 0; i < params.size(); i++) {
+				Param &a = params[i];
+				if (a.guessed()) {
+					a.t = a.guess;
+					a.ref.builtin = a.guess_builtin;
+					any = true;
+				}
+				same = same && a.t == f.typed->params[i].t && a.ref.builtin == f.typed->params[i].ref.builtin;
+			}
+			if (any ? same : !f.typed) {
+				continue;
+			}
+			changed = true;
+			f.typed = nullptr;
+			if (any) {
+				f.typed = std::make_shared<Fn>(f);
+				f.typed->params = params;
+				f.typed->clone = true;
+			}
+		}
+		return changed;
+	}
+
+	std::string typed_entry(const Fn &f) {
+		if (!f.typed) {
+			return "";
+		}
+		const Fn &g = *f.typed;
+		std::string test, list;
+		for (size_t i = 0; i < f.params.size(); i++) {
+			const Param &c = g.params[i];
+			std::string value = "l_" + c.name;
+			if (c.guessed()) {
+				const std::string type = c.ref.builtin.empty() ? vty(c.t) : c.ref.builtin;
+				test += (test.empty() ? "" : " && ") + std::string("gn::raw_type(") + value + ") == Variant::" + type;
+				if (c.t != Ty::Var) {
+					value = std::string("gn::cast<") + cty(c.t) + ">(" + value + ", Variant::" + type + ", " + L(f.line) + ")";
+				}
+			}
+			list += (i ? ", " : "") + value;
+		}
+		std::string call = "f_" + f.name + "__typed(" + list + ")";
+		std::string body = g.ret == Ty::Void ? call + "; return;" : "return " + conv(E{ call, g.ret }, f.ret, f.line) + ";";
+		return "if (" + test + ") { " + body + " }\n";
 	}
 
 	void finish_inference(bool settled) {
@@ -3965,7 +4127,12 @@ public:
 				f.ret_ref = settled ? f.ret_ref : TypeRef();
 				f.declared = f.ret;
 			}
+			f.typed = settled ? f.typed : nullptr;
+			if (f.typed) {
+				f.typed->declared = f.typed->ret;
+			}
 		}
+		observing = false;
 		for (Member &m : members) {
 			m.t = m.weak && !settled ? Ty::Var : m.t;
 		}
@@ -4165,7 +4332,17 @@ public:
 				defs += sig + ") {\n\treturn gn::run(cf_" + f.name + "(" + names + "));\n}\n\n";
 				defs += "gn::Task C::cf_" + f.name + "(" + params + ") {\n" + emit_fn(f) + "}\n\n";
 			} else {
-				defs += sig + ") {\n" + emit_fn(f) + "}\n\n";
+				std::string entry = typed_entry(f);
+				defs += sig + ") {\n" + entry + emit_fn(f) + "}\n\n";
+			}
+			if (f.typed) {
+				const Fn &g = *f.typed;
+				std::string list;
+				for (const Param &a : g.params) {
+					list += std::string(list.empty() ? "" : ", ") + cty(a.t) + " l_" + a.name;
+				}
+				decl += std::string(f.is_static ? "\tstatic " : "\t") + cty(g.ret) + " f_" + f.name + "__typed(" + list + ");\n";
+				defs += std::string(cty(g.ret)) + " C::f_" + f.name + "__typed(" + list + ") {\n" + emit_fn(g) + "}\n\n";
 			}
 			emit_default_overloads(f, decl, defs);
 		}
@@ -4382,7 +4559,34 @@ class Project {
 	}
 
 	// shortcut: a member is seen as written only through `.name =` or the name as a string, so a computed property name that stores another type fails loudly at runtime, track those if it comes up
-	bool collect_written(const std::string &src, std::set<std::string> &written) const {
+	// shortcut: matches calls by name and reads only literal arguments, upgrade if interpreted callers pass typed variables
+	static void collect_literals(const std::vector<Tok> &tokens, size_t q, std::map<size_t, std::set<Ty>> &seen) {
+		static const std::map<TK, Ty> kinds = { { TK::Int, Ty::Int }, { TK::Float, Ty::Float }, { TK::Str, Ty::Str } };
+		int depth = 0;
+		size_t arg = 0, start = q + 2;
+		for (size_t i = start; i < tokens.size(); i++) {
+			const Tok &x = tokens[i];
+			const bool op = x.k == TK::Op;
+			if (op && depth == 0 && (x.s == "," || x.s == ")")) {
+				const Tok &first = tokens[start + (tokens[start].k == TK::Op && tokens[start].s == "-")];
+				if (&tokens[i - 1] == &first && kinds.count(first.k)) {
+					seen[arg].insert(kinds.at(first.k));
+				} else if (&tokens[i - 1] == &first && (first.s == "true" || first.s == "false")) {
+					seen[arg].insert(Ty::Bool);
+				}
+				if (x.s == ")") {
+					return;
+				}
+				arg++;
+				start = i + 1;
+				continue;
+			}
+			depth += op && (x.s == "(" || x.s == "[" || x.s == "{");
+			depth -= op && (x.s == ")" || x.s == "]" || x.s == "}");
+		}
+	}
+
+	bool collect_written(const std::string &src, std::set<std::string> &written, CallVotes &calls) const {
 		static const std::set<std::string> writes = { "=", "+=", "-=", "*=", "/=", "%=", "**=", "&=", "|=", "^=", "<<=", ">>=" };
 		std::vector<Tok> tokens;
 		try {
@@ -4391,6 +4595,9 @@ class Project {
 			return false;
 		}
 		for (size_t q = 0; q < tokens.size(); q++) {
+			if (tokens[q].k == TK::Id && q + 2 < tokens.size() && tokens[q + 1].k == TK::Op && tokens[q + 1].s == "(") {
+				collect_literals(tokens, q, calls[tokens[q].s]);
+			}
 			if (tokens[q].k == TK::Str) {
 				written.insert(tokens[q].s);
 			} else if (q + 2 < tokens.size() && tokens[q].k == TK::Op && tokens[q].s == "." && tokens[q + 2].k == TK::Op && writes.count(tokens[q + 2].s)) {
@@ -4402,13 +4609,14 @@ class Project {
 
 	void infer_types(const std::vector<std::string> &all, const std::vector<std::pair<std::string, std::string>> &embedded, const std::set<std::string> &virtuals) {
 		std::set<std::string> written;
+		CallVotes calls;
 		bool readable = true;
 		for (const std::string &path : all) {
 			std::string src;
-			readable = query.read(path, src) && collect_written(src, written) && readable;
+			readable = query.read(path, src) && collect_written(src, written, calls) && readable;
 		}
 		for (const auto &e : embedded) {
-			readable = collect_written(e.second, written) && readable;
+			readable = collect_written(e.second, written, calls) && readable;
 		}
 		bool settled = false;
 		for (Compiler *c : order) {
@@ -4416,14 +4624,18 @@ class Project {
 				c->stop_member_inference();
 			}
 			c->demote_members(written);
+			c->prepare_parameters(virtuals);
 		}
-		for (int round = 0; round < 8 && !settled; round++) {
+		for (int round = 0; round < 16 && !settled; round++) {
 			settled = true;
 			for (Compiler *c : order) {
 				settled = !c->infer_members() && settled;
 			}
 			for (Compiler *c : order) {
 				settled = !c->infer_bodies(virtuals) && settled;
+			}
+			for (Compiler *c : order) {
+				settled = !c->update_clones(calls) && settled;
 			}
 		}
 		for (Compiler *c : order) {
