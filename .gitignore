@@ -8,6 +8,7 @@
 *.exp
 *.pdb
 __pycache__/
+src/editor/embedded_sources.gen.h
 demo/.godot/
 demo/addons/godot_native/bin/
 demo/addons/godot_native/generated/

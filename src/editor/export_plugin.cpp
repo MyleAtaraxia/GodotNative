@@ -1,5 +1,7 @@
 #include "pragma_editor.h"
 
+#include "embedded_sources.gen.h"
+
 #include <godot_cpp/classes/class_db_singleton.hpp>
 #include <godot_cpp/classes/dir_access.hpp>
 #include <godot_cpp/classes/display_server.hpp>
@@ -61,10 +63,49 @@ struct ApiData {
 	std::map<std::string, std::pair<std::string, bool>> utilities;
 };
 
+// A project copied from the demo has no build folder. SConstruct goes last, so an interrupted attempt runs again.
+bool create_build_folder(const String &build) {
+	const String cpp = build.path_join("godot-cpp");
+	const String url = "https://github.com/godotengine/godot-cpp.git";
+	UtilityFunctions::print("[GodotNative] creating ", build, " and downloading godot-cpp");
+	DirAccess::make_dir_recursive_absolute(build.path_join("src"));
+	FileAccess::open(build.path_join(".gdignore"), FileAccess::WRITE);
+	OS *os = OS::get_singleton();
+	Array output;
+	if (!FileAccess::file_exists(cpp.path_join("SConstruct"))) {
+		const PackedStringArray steps[] = {
+			{ "init", "-q", cpp },
+			{ "-C", cpp, "fetch", "-q", "--depth", "1", url, EMBEDDED_GODOT_CPP_COMMIT },
+			{ "-C", cpp, "checkout", "-q", "FETCH_HEAD" },
+		};
+		for (const PackedStringArray &step : steps) {
+			if (os->execute("git", step, output, true) != 0) {
+				UtilityFunctions::push_error("[GodotNative] could not download godot-cpp, which needs git and a connection:\n", output);
+				return false;
+			}
+		}
+	}
+	for (int i = sizeof(EMBEDDED_SOURCES) / sizeof(EMBEDDED_SOURCES[0]) - 1; i >= 0; i--) {
+		FileAccess::open(build.path_join(EMBEDDED_SOURCES[i].path), FileAccess::WRITE)->store_string(String::utf8(EMBEDDED_SOURCES[i].text));
+	}
+	return true;
+}
+
 String project_root() {
+	static bool failed = false;
 	String project = ProjectSettings::get_singleton()->globalize_path("res://").trim_suffix("/");
 	String bundled = project.path_join("addons/godot_native/build");
-	return FileAccess::file_exists(bundled.path_join("SConstruct")) ? bundled : project.get_base_dir();
+	if (FileAccess::file_exists(bundled.path_join("SConstruct"))) {
+		return bundled;
+	}
+	if (FileAccess::file_exists(project.get_base_dir().path_join("SConstruct"))) {
+		return project.get_base_dir();
+	}
+	if (!failed && create_build_folder(bundled)) {
+		return bundled;
+	}
+	failed = true;
+	return bundled;
 }
 
 // shortcut: only Godot 4 is searched, and an engine newer than godot-cpp's bundled files uses the newest one. Upgrade godot-cpp to reach newer API.
