@@ -1,5 +1,7 @@
 #!/usr/bin/env python
+import glob
 import os
+import subprocess
 
 SetOption("implicit_cache", 1)
 
@@ -22,6 +24,16 @@ ours.Append(CXXFLAGS=["-std=c++20"])
 sources = Glob("src/*.cpp")
 if env["target"] == "editor":
     sources += Glob("src/editor/*.cpp")
+    # The plugin recreates these in projects that have no build folder.
+    embedded = ["SConstruct"] + sorted(glob.glob("src/*.cpp") + glob.glob("src/*.h"))
+    with open("src/editor/embedded_sources.gen.h", "w", encoding="utf-8", newline="\n") as header:
+        commit = subprocess.run(["git", "rev-parse", "HEAD:godot-cpp"], capture_output=True, text=True).stdout.strip()
+        header.write('const char *EMBEDDED_GODOT_CPP_COMMIT = "%s";\n' % commit)
+        header.write("const struct { const char *path; const char *text; } EMBEDDED_SOURCES[] = {\n")
+        for path in embedded:
+            with open(path, encoding="utf-8", newline="") as f:
+                header.write('{"%s", R"GN_%s(%s)GN_%s"},\n' % (path.replace(os.sep, "/"), "EMBED", f.read(), "EMBED"))
+        header.write("};\n")
 else:
     generated = Glob(project + "/addons/godot_native/generated/*.cpp")
     sources += generated
